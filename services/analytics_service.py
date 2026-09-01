@@ -612,6 +612,18 @@ def get_advanced_analytics(
     net_after_true = total_earnings - true_deductions
     net_value = total_earnings - total_deductions
 
+    # Salário-hora efetivo: horas contratuais (perfil) + estimativa de horas
+    # extras (equivalente em horas-base do bruto de H.E./DSR) e o líquido das
+    # extras após a alíquota efetiva de retenção.
+    monthly_hours = 220.0
+    base_hourly = 0.0
+    if profile is not None and getattr(profile, "base_rate", 0.0) > 0:
+        monthly_hours = float(getattr(profile, "monthly_hours", 220.0) or 220.0)
+        base_hourly, _baseline_gross = _profile_hourly_gross(profile)
+    extra_gross = overtime_total + dsr_overtime_total
+    extra_hours = _safe_div(extra_gross, base_hourly) if base_hourly > 0 else 0.0
+    extra_net = extra_gross * (1.0 - (effective_tax_rate / 100.0))
+
     return {
         "meta": {
             "count": count,
@@ -627,11 +639,15 @@ def get_advanced_analytics(
             "recurrent_net_sum": round(recurrent_net, 2),
             "recurrent_net_months": recurrent_count,
             "theoretical_recurrent_net": round(theoretical, 2),
+            "monthly_hours": round(monthly_hours, 2),
+            "base_hourly": round(base_hourly, 2),
         },
         "overtime": {
             "total": round(overtime_total, 2),
             "dsr_overtime": round(dsr_overtime_total, 2),
             "ratio": round(overtime_ratio, 2),
+            "net": round(extra_net, 2),
+            "extra_hours": round(extra_hours, 2),
             "labels": [
                 "Salário Base",
                 "Horas Extras",
@@ -889,6 +905,8 @@ def audit_paystub_anomalies(user_id: int) -> List[dict]:
                             f"vs. média de 3 meses (R$ {cur[code]:.2f} vs. R$ {avg:.2f})."
                         ),
                         "month": month,
+                        # Impacto monetário da discrepância (R$).
+                        "amount": round(cur[code] - avg, 2),
                     }
                 )
 

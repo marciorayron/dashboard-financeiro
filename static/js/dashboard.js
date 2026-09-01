@@ -105,6 +105,19 @@ function applyAdvancedAnalytics(data) {
   safeText("kpiOvertimeVuln", formatPercent(overtime.ratio));
   safeText("kpiOvertimeVulnSub", formatCurrency((Number(overtime.total) || 0) + (Number(overtime.dsr_overtime) || 0)) + " em H.E./DSR");
 
+  // Salário-Hora Efetivo = (Líquido + Líquido das H.E.) / (Horas + Horas extras).
+  const netSalary = Number(meta.recurrent_net_pay) || 0;
+  const extraNet = Number(overtime.net) ||
+    ((Number(overtime.total) || 0) + (Number(overtime.dsr_overtime) || 0)) *
+      (1 - (Number(meta.effective_tax_rate) || 0) / 100);
+  const contractHours = Number(meta.monthly_hours) || 220;
+  const extraHours = Number(overtime.extra_hours) || 0;
+  const totalHours = contractHours + extraHours;
+  const effHourly = totalHours > 0 ? (netSalary + extraNet) / totalHours : 0;
+  safeText("kpiEffHourly", formatCurrency(effHourly));
+  safeText("kpiEffHourlySub",
+    formatCurrency(netSalary + extraNet) + " / " + totalHours.toFixed(1) + "h");
+
   safeText("kpiRetentionRate", formatPercent(inssRate + irrfRate));
   safeText("kpiRetentionSub", "INSS " + formatPercent(inssRate) + " + IRRF " + formatPercent(irrfRate));
 
@@ -856,6 +869,18 @@ function renderAnomalies(flags) {
   const list = document.getElementById("anomalyList");
   const empty = document.getElementById("anomalyEmpty");
   const count = document.getElementById("anomalyCount");
+
+  // Total R$ das discrepâncias monetárias detectadas no painel de auditoria
+  // (ex.: surtos de benefícios — refeição, plano de saúde, fretado).
+  const totalDiscrepancy = flags.reduce(function (sum, f) {
+    const amt = (typeof f.amount === "number" && isFinite(f.amount))
+      ? f.amount
+      : extractAnomalyAmount(f.description);
+    return sum + (amt || 0);
+  }, 0);
+  safeText("kpiAnomalyTotal", formatCurrency(totalDiscrepancy));
+  safeText("kpiAnomalyTotalSub", "em discrepâncias identificadas");
+
   if (!list) return;
   count.textContent = (flags || []).length;
 
@@ -903,6 +928,27 @@ function extractVariance(description) {
   const values = matches.map(parse).filter(function (v) { return !isNaN(v); });
   if (values.length < 2) return null;
   return values[values.length - 1] - values[0];
+}
+
+function _parseBrlAmount(value) {
+  // Converte valores monetários: "1234.56" (formato Python :.2f) ou
+  // "1.234,56" (formato pt-BR) para número.
+  const s = String(value).trim();
+  if (!s) return NaN;
+  if (s.indexOf(",") !== -1) return parseFloat(s.replace(/\./g, "").replace(",", "."));
+  return parseFloat(s);
+}
+
+function extractAnomalyAmount(description) {
+  // Procura pares monetários do tipo "R$ cur vs. R$ avg" (ex.: surtos de
+  // benefícios) e devolve o impacto monetário (diferença absoluta), ou null.
+  if (!description) return null;
+  const m = String(description).match(/R\$\s*([\d.,]+)\s*vs\.?\s*R\$\s*([\d.,]+)/i);
+  if (!m) return null;
+  const cur = _parseBrlAmount(m[1]);
+  const avg = _parseBrlAmount(m[2]);
+  if (isNaN(cur) || isNaN(avg)) return null;
+  return Math.abs(cur - avg);
 }
 
 
