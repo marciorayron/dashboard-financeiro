@@ -1,0 +1,42 @@
+# =====================================================================
+# docker-compose.yml
+# Dashboard Financeiro Pessoal
+# =====================================================================
+services:
+  dashboard-financeiro:
+    # Nome do container.
+    container_name: dashboard-financeiro
+    # Construção a partir do Dockerfile local.
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # Porta: host:container.
+    ports:
+      - "5000:5000"
+    # Reinicia automaticamente se o processo cair.
+    restart: unless-stopped
+    # Carrega segredos/config a partir do `.env` local (não versionado).
+    env_file:
+      - .env
+    # Volumes persistentes (banco de dados e uploads).
+    volumes:
+      - ./data:/app/data
+      - ./uploads:/app/uploads
+    # Variáveis de ambiente com caminhos do container (e defaults seguros).
+    environment:
+      - FLASK_ENV=${FLASK_ENV:-production}
+      - FLASK_APP=app.py
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+      - DATABASE_PATH=/app/data/financeiro.db
+      - UPLOAD_FOLDER=/app/uploads
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      - GUNICORN_WORKERS=${GUNICORN_WORKERS:-2}
+    # Healthcheck: aguarda a aplicação responder em /health.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health')"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+

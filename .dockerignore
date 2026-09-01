@@ -1,0 +1,31 @@
+# .dockerignore
+# Arquivos/pastas que NÃO entram na imagem Docker.
+
+# Dependências locais e ambientes virtuais.
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Dados e uploads (persistidos via volume).
+data/
+uploads/
+
+# Configuração sensível.
+.env
+.env.example
+
+# Controle de versão e IDE.
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# Artefatos de build/teste.
+.pytest_cache/
+.mypy_cache/
+*.log
+
+# Documentação
+README.md
