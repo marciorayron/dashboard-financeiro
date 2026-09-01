@@ -100,19 +100,20 @@ Acesse **http://localhost:5000**, crie uma conta e comece a importar PDFs.
 O banco SQLite é criado automaticamente em `data/financeiro.db` (com as
 tabelas e migrações aplicadas no startup).
 
-> **Primeiro admin:** o papel de administrador é definido via banco
-> (`users.role = 'admin'`). Após criar a primeira conta, promova-a com:
+> **Primeiro admin:** a conta de administrador é provisionada **automaticamente**
+> na primeira inicialização do banco (quando nenhum usuário com papel `admin`
+> existe). Credenciais padrão — configuraveis por variáveis de ambiente:
+>
+> | Variável | Padrão |
+> |---|---|
+> | `ADMIN_EMAIL` | `admin@admin.com` |
+> | `ADMIN_PASSWORD` | `admin123` |
+>
+> Em produção, defina `ADMIN_EMAIL`/`ADMIN_PASSWORD` no `.env` **antes** do
+> primeiro startup. Para recriar/resetar a conta do admin manualmente:
 > ```bash
-> .venv/Scripts/python -c "
-> from app import create_app
-> from database.connection import get_db
-> from models.user import set_user_role, get_user_by_email
-> app = create_app('development')
-> with app.app_context():
->     db = get_db()
->     u = get_user_by_email(db, 'seu@email.com')
->     set_user_role(db, u.id, 'admin')
-> "
+> flask seed-admin            # cria se ainda não existir
+> flask seed-admin --reset    # força a recriação/reset da conta padrão
 > ```
 
 ## Configuração de Ambiente (variáveis)

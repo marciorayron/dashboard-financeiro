@@ -115,15 +115,22 @@ def _apply_migrations(conn):
 
 def init_db():
     """
-    Inicializa o banco de dados executando o script `schema.sql`.
+    Inicializa o banco de dados executando o script `schema.sql` e garante a
+    existência do administrador padrão (RBAC).
 
     É chamado no startup da aplicação (ver `app.py`). Executar múltiplas
-    vezes é seguro: as instruções usam `CREATE TABLE IF NOT EXISTS`.
+    vezes é seguro: as instruções usam `CREATE TABLE IF NOT EXISTS` e o seeder
+    é idempotente (só cria o admin quando nenhum usuário `admin` existe).
 
-    Nota: usuários agora são criados via registro autenticado
-    (ver `routes/auth.py`), não mais por seed automático.
+    Nota: usuários regulares são criados via registro autenticado
+    (ver `routes/auth.py`); o seeder cobre apenas o primeiro admin.
     """
     conn = get_db()
     _exec_schema(conn)
+
+    # Importa no corpo para evitar ciclos de import com models/seed.
+    from database.seed import seed_default_admin
+
+    seed_default_admin(conn)
     conn.commit()
 

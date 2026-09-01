@@ -101,7 +101,39 @@ def create_app(env: str = None) -> Flask:
     # 6) Registra os blueprints.
     register_blueprints(app)
 
+    # 7) Comando CLI: criar/recriar o administrador padrão (RBAC).
+    _register_seed_admin_cli(app)
+
     return app
+
+
+def _register_seed_admin_cli(app):
+    """Registra `flask seed-admin` para provisionar/resetar o admin padrão."""
+    import click
+
+    @app.cli.command("seed-admin")
+    @click.option(
+        "--reset",
+        is_flag=True,
+        help="Força o re-provisionamento/reset do admin padrão mesmo que já exista.",
+    )
+    def seed_admin_command(reset):
+        """Cria (ou recria, com --reset) a conta de administrador padrão."""
+        from database.connection import get_db
+        from database.seed import seed_default_admin
+
+        with app.app_context():
+            db = get_db()
+            info = seed_default_admin(db, force=reset)
+            if info["skipped"]:
+                click.echo(
+                    f"Admin já existente; nada a fazer. Use `flask seed-admin --reset` "
+                    f"para recriar a conta {info['email']}."
+                )
+            elif info["created"]:
+                click.echo(f"[SEED] Default admin user created: {info['email']}")
+            else:
+                click.echo(f"[SEED] Default admin user reset: {info['email']}")
 
 
 # Instância padrão criada no import (para servidores WSGI e `flask run`).
