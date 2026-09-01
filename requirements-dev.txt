@@ -1,0 +1,8 @@
+# ============================================================
+# Dependências de DESENVOLVIMENTO/TESTE (instaladas localmente).
+# Inclui o runtime + ferramentas de teste.
+# ============================================================
+-r requirements.txt
+
+# Testes (pytest + unittest integrados).
+pytest

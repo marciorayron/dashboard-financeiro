@@ -1,0 +1,39 @@
+# .gitignore
+# Arquivos/pastas que NÃO devem ir para o controle de versão.
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Flask instance folder (segredos/arquivos gerados em runtime).
+instance/
+
+# Dados e uploads (persistidos via volume Docker).
+data/
+uploads/
+
+# Bancos de dados locais (SQLite) e uploads locais.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+*.sqlite
+
+# Configuração sensível (o template .env.example é versionado).
+.env
+
+# Diretório de scripts/clínica local (não versionado).
+.clinic/
+
+# Ferramentas/IDE
+.vscode/
+.idea/
+*.swp
+
+# Artefatos de teste/build
+.pytest_cache/
+.mypy_cache/
+*.log
