@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="pt-BR" data-bs-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{ title }}</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+</head>
+<body class="app-body">
+
+  <!-- ======================= Navbar ======================= -->
+  <nav class="navbar navbar-expand-lg app-navbar mb-4">
+    <div class="container">
+      <a class="navbar-brand" href="{{ url_for('main.dashboard') }}">
+        <i class="bi bi-graph-up-arrow me-2"></i>Dashboard Financeiro
+      </a>
+      <div class="d-flex align-items-center gap-3">
+        <span class="navbar-text small d-none d-md-inline">
+          <i class="bi bi-person-circle me-1"></i>{{ user_name }}
+        </span>
+        <button type="button" class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#profileModal">
+          <i class="bi bi-sliders me-1"></i>Perfil
+        </button>
+        {% if is_admin %}
+        <a href="{{ url_for('admin.index') }}" class="btn btn-sm btn-outline-warning">
+          <i class="bi bi-speedometer2 me-1"></i>Admin
+        </a>
+        {% endif %}
+        <a href="/api/export/excel" class="btn btn-sm btn-outline-success">
+          <i class="bi bi-file-earmark-excel me-1"></i>Exportar XLSX
+        </a>
+        <a href="/api/export/csv" class="btn btn-sm btn-outline-secondary">
+          <i class="bi bi-filetype-csv me-1"></i>Exportar CSV
+        </a>
+        <a href="/api/reports/dossier-pdf" target="_blank" class="btn btn-sm btn-outline-success">
+          <i class="bi bi-file-earmark-pdf me-1"></i>Exportar Dossiê PDF
+        </a>
+        <a href="{{ url_for('auth.logout') }}" class="btn btn-sm btn-outline-danger">
+          <i class="bi bi-box-arrow-right me-1"></i>Sair
+        </a>
+      </div>
+    </div>
+  </nav>
+
+  <main class="container pb-5">
+
+    <!-- Mensagens flash -->
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <div class="mb-3">
+          {% for category, message in messages %}
+            <div class="alert alert-{{ category }} alert-dismissible fade show py-2" role="alert">
+              {{ message }}
+              <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Fechar"></button>
+            </div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+
+    <!-- Upload compacto (banner horizontal no topo) -->
+    <div class="card panel upload-banner mb-3">
+      <div class="card-body py-2">
+        <div id="dropzone" class="upload-dropzone d-flex align-items-center justify-content-center gap-2 px-3 py-2" role="button" tabindex="0">
+          <i class="bi bi-cloud-arrow-up fs-4 upload-icon"></i>
+          <span class="fw-semibold">Arraste e solte PDFs aqui</span>
+          <span class="text-secondary small d-none d-md-inline">ou clique para selecionar (múltiplos arquivos)</span>
+          {% if deepseek_enabled %}
+          <span class="badge text-bg-info small"><i class="bi bi-stars me-1"></i>IA</span>
+          {% endif %}
+        </div>
+        <input type="file" id="fileInput" accept=".pdf,application/pdf" multiple class="d-none" />
+        <div id="uploadProgress" class="progress d-none mt-2" role="progressbar" style="height: 6px;">
+          <div id="uploadProgressBar" class="progress-bar progress-bar-striped progress-bar-animated" style="width: 0%"></div>
+        </div>
+        <div id="uploadStatus" class="small text-secondary mt-1 d-none"></div>
+      </div>
+    </div>
+
+    <!-- KPIs orientados à decisão -->
+    <div class="card panel mb-3">
+      <div class="card-body">
+        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+          <h5 class="panel-title mb-0"><i class="bi bi-speedometer2 me-2"></i>Indicadores para Decisão</h5>
+          <div class="d-flex flex-wrap align-items-center gap-2">
+            <select id="advFilterMonth" class="form-select form-select-sm w-auto" aria-label="Filtrar por competência">
+              <option value="">Todos os meses</option>
+            </select>
+            <select id="advFilterCompany" class="form-select form-select-sm w-auto" aria-label="Filtrar por empresa">
+              <option value="">Todas as empresas</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="row g-3">
+          <div class="col-6 col-xl-3">
+            <div class="card kpi-card h-100">
+              <div class="card-body">
+                <div class="kpi-title">Líquido Recorrente Efetivo</div>
+                <div class="kpi-value success" id="kpiRecurrentNet">R$ 0,00</div>
+                <div class="kpi-subtitle text-secondary small" id="kpiRecurrentNetSub">média de meses completos</div>
+              </div>
+            </div>
+          </div>
+          <div class="col-6 col-xl-3">
+            <div class="card kpi-card h-100">
+              <div class="card-body">
+                <div class="kpi-title">Vulnerabilidade de H.E.</div>
+                <div class="kpi-value warning" id="kpiOvertimeVuln">0%</div>
+                <div class="kpi-subtitle text-secondary small" id="kpiOvertimeVulnSub">R$ 0,00 em horas extras</div>
+              </div>
+            </div>
+          </div>
+          <div class="col-6 col-xl-3">
+            <div class="card kpi-card h-100">
+              <div class="card-body">
+                <div class="kpi-title">Alíquota Efetiva de Retenção</div>
+                <div class="kpi-value danger" id="kpiRetentionRate">0%</div>
+                <div class="kpi-subtitle text-secondary small" id="kpiRetentionSub">INSS 0% + IRRF 0%</div>
+              </div>
+            </div>
+          </div>
+          <div class="col-6 col-xl-3">
+            <div class="card kpi-card h-100">
+              <div class="card-body">
+                <div class="kpi-title">Projeção de Entrada Anual</div>
+                <div class="kpi-value" id="kpiAnnualInflow">R$ 0,00</div>
+                <div class="kpi-subtitle text-secondary small" id="kpiAnnualInflowSub">baseline 12m</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <!-- Ação: grid de 2 colunas (Simulador 40% + Inconsistências 60%) -->
+    <div class="row g-3 mb-3">
+      <!-- Coluna esquerda: Simulador de Horas Extras (permanente) -->
+      <div class="col-lg-5">
+        <div class="card panel h-100">
+          <div class="card-body d-flex flex-column">
+            <h5 class="panel-title mb-3"><i class="bi bi-clock-history me-2"></i>Simulador de Horas Extras</h5>
+            <div class="d-flex justify-content-between align-items-baseline mb-1">
+              <span id="otMultipliersLabel" class="small text-secondary">Horas Extras</span>
+              <span class="fs-5 fw-bold" id="otHoursLabel">0 h</span>
+            </div>
+            <input type="range" class="form-range range-with-ticks" id="otHoursSlider" min="0" max="120" value="0" step="1" list="otTicks" />
+            <datalist id="otTicks">
+              <option value="0" label="0h"></option>
+              <option value="30" label="30h"></option>
+              <option value="60" label="60h"></option>
+              <option value="90" label="90h"></option>
+              <option value="120" label="120h"></option>
+            </datalist>
+            <div class="d-flex justify-content-between small text-secondary mb-3 px-1">
+              <span>0h</span><span>30h</span><span>60h</span><span>90h</span><span>120h</span>
+            </div>
+
+            <div class="row g-2 mt-auto">
+              <div class="col-4">
+                <div class="border rounded p-2 text-center h-100">
+                  <div class="small text-secondary">Bruto Extra (com DSR)</div>
+                  <div class="fw-bold" id="otGrossExtra">R$ 0,00</div>
+                  <div class="small text-secondary" id="otGrossBreakdown"></div>
+                </div>
+              </div>
+              <div class="col-4">
+                <div class="border rounded p-2 text-center h-100">
+                  <div class="small text-secondary">Líquido Extra</div>
+                  <div class="fw-bold text-success" id="otNet">R$ 0,00</div>
+                </div>
+              </div>
+              <div class="col-4">
+                <div class="border rounded p-2 text-center h-100">
+                  <div class="small text-secondary">Taxa Efetiva / Hora</div>
+                  <div class="fw-bold text-info" id="otEffectiveRate">R$ 0,00</div>
+                </div>
+              </div>
+            </div>
+            <div class="small text-secondary mt-2 d-flex justify-content-between gap-2 flex-wrap">
+              <span id="otPerHour">Configure o perfil para simular.</span>
+              <span id="otTaxBite" class="text-warning text-end"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Coluna direita: Central de Inconsistências e Auditoria -->
+      <div class="col-lg-7">
+        <div class="card panel h-100">
+          <div class="card-body d-flex flex-column">
+            <div class="d-flex align-items-center justify-content-between mb-2">
+              <h5 class="panel-title mb-0"><i class="bi bi-shield-check me-2"></i>Central de Inconsistências &amp; Auditoria</h5>
+              <span class="badge text-bg-secondary" id="anomalyCount">0</span>
+            </div>
+            <div id="anomalyEmpty" class="text-center text-secondary small py-4 d-none">
+              <i class="bi bi-check-circle text-success me-1"></i>Nenhuma inconsistência detectada.
+            </div>
+            <div id="anomalyList" class="list-group list-group-flush anomaly-list"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Gráficos Analíticos (grid 2x2) -->
+    <div class="row g-3 mb-3">
+      <div class="col-lg-6">
+        <div class="card panel h-100">
+          <div class="card-body">
+            <h5 class="panel-title mb-2"><i class="bi bi-graph-up me-2"></i>Renda Líquida x Bruta</h5>
+            <div id="monthly-trend-chart" class="chart-container"></div>
+          </div>
+        </div>
+      </div>
+      <div class="col-lg-6">
+        <div class="card panel h-100">
+          <div class="card-body">
+            <h5 class="panel-title mb-2"><i class="bi bi-bar-chart me-2"></i>Decomposição de Descontos</h5>
+            <div id="deductions-breakdown-chart" class="chart-container"></div>
+          </div>
+        </div>
+      </div>
+      <div class="col-lg-6">
+        <div class="card panel h-100">
+          <div class="card-body">
+            <h5 class="panel-title mb-2"><i class="bi bi-clipboard-data me-2"></i>Proporção da Renda: Base × H.E. × DSR</h5>
+            <div id="overtime-breakdown-chart" class="chart-container"></div>
+          </div>
+        </div>
+      </div>
+      <div class="col-lg-6">
+        <div class="card panel h-100">
+          <div class="card-body">
+            <h5 class="panel-title mb-2"><i class="bi bi-calendar-range me-2"></i>Projeção Patrimonial Anual</h5>
+            <div id="annual-projection-chart" class="chart-container"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <!-- Tabela de holerites (colapsável, recolhida por padrão) -->
+    <details class="card panel history-accordion">
+      <summary class="history-summary">
+        <span class="history-title"><i class="bi bi-folder2-open me-2"></i>Histórico de Holerites (<span id="holeriteCount">0</span> documentos registrados)</span>
+        <span class="d-flex align-items-center gap-2">
+          <span class="history-hint text-secondary small">— Clique para expandir</span>
+          <button type="button" class="btn btn-sm btn-outline-info"
+                  onclick="event.preventDefault(); event.stopPropagation(); exportSpreadsheet();">
+            <i class="bi bi-file-earmark-spreadsheet me-1"></i>Exportar Planilha
+          </button>
+        </span>
+      </summary>
+      <div class="card-body">
+        <div class="table-responsive">
+          <table class="table table-hover align-middle mb-0">
+            <thead>
+              <tr>
+                <th>Empresa</th>
+                <th>Competência</th>
+                <th>Tipo</th>
+                <th>Líquido</th>
+                <th>Proventos</th>
+                <th class="text-end">Ações</th>
+              </tr>
+            </thead>
+            <tbody id="holeritesTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </details>
+
+  </main>
+
+  <!-- Rodapé -->
+  <footer class="footer text-center py-3">
+    Dashboard Financeiro Pessoal &middot; Flask + SQLite + DeepSeek + Plotly
+  </footer>
+
+  <!-- Modal de detalhe -->
+  <div class="modal fade" id="detailModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="detailModalTitle">Detalhe do Holerite</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fechar"></button>
+        </div>
+        <div class="modal-body">
+          <div class="row g-3 mb-3" id="detailTotals"></div>
+          <h6 class="panel-title mb-2">Rubricas</h6>
+          <div class="table-responsive">
+            <table class="table table-sm align-middle">
+              <thead><tr><th>Código</th><th>Descrição</th><th>Tipo</th><th class="text-end">Valor</th></tr></thead>
+              <tbody id="detailLineItems"></tbody>
+            </table>
+          </div>
+          <h6 class="panel-title mb-2 mt-3">Texto Bruto</h6>
+          <pre id="detailRawText" class="raw-text"></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal de perfil -->
+  <div class="modal fade" id="profileModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title"><i class="bi bi-sliders me-2"></i>Perfil &amp; Contrato</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fechar"></button>
+        </div>
+        <div class="modal-body">
+          <form id="profileForm">
+            <div class="row g-3">
+              <div class="col-md-6">
+                <label class="form-label" for="pfAdmission">Data de Admissão</label>
+                <input type="date" class="form-control form-control-sm" id="pfAdmission" />
+              </div>
+              <div class="col-md-6">
+                <label class="form-label" for="pfJobTitle">Cargo</label>
+                <input type="text" class="form-control form-control-sm" id="pfJobTitle" placeholder="Ex.: Líder de Produção II" />
+              </div>
+              <div class="col-md-6">
+                <label class="form-label" for="pfContractType">Tipo de Contrato</label>
+                <select class="form-select form-select-sm" id="pfContractType">
+                  <option value="HORISTA">Horista</option>
+                  <option value="MENSALISTA">Mensalista</option>
+                </select>
+              </div>
+              <div class="col-md-6">
+                <label class="form-label" id="pfRateLabel" for="pfBaseRate">Valor por Hora (R$)</label>
+                <input type="number" step="0.01" min="0" class="form-control form-control-sm" id="pfBaseRate" />
+              </div>
+              <div class="col-md-6">
+                <label class="form-label" for="pfMonthlyHours">Horas Mensais</label>
+                <input type="number" step="0.5" min="0" class="form-control form-control-sm" id="pfMonthlyHours" value="220" />
+              </div>
+              <div class="col-md-6">
+                <label class="form-label" for="pfDependents">Dependentes p/ IRRF</label>
+                <input type="number" min="0" class="form-control form-control-sm" id="pfDependents" value="0" />
+              </div>
+              <div class="col-md-12">
+                <label class="form-label" for="pfFixedBenefits">Desconto Fixo de Benefícios (R$)</label>
+                <input type="number" step="0.01" min="0" class="form-control form-control-sm" id="pfFixedBenefits" value="0" />
+              </div>
+              <div class="col-12">
+                <div class="panel-title small text-secondary mt-1 mb-1">Regras de Horas Extras (progressivas)</div>
+              </div>
+              <div class="col-md-4">
+                <label class="form-label" for="pfOT1Rate">Multiplicador 1º patamar</label>
+                <input type="number" step="0.05" min="1" class="form-control form-control-sm" id="pfOT1Rate" value="1.70" />
+              </div>
+              <div class="col-md-4">
+                <label class="form-label" for="pfOT1Limit">Limite 1º patamar (h)</label>
+                <input type="number" step="1" min="0" class="form-control form-control-sm" id="pfOT1Limit" value="30" />
+              </div>
+              <div class="col-md-4">
+                <label class="form-label" for="pfOT2Rate">Multiplicador acima</label>
+                <input type="number" step="0.05" min="1" class="form-control form-control-sm" id="pfOT2Rate" value="2.00" />
+              </div>
+            </div>
+            <div class="d-flex justify-content-end gap-2 mt-3">
+              <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+              <button type="submit" class="btn btn-sm btn-primary">Salvar Perfil</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div class="toast-container position-fixed bottom-0 end-0 p-3">
+    <div id="appToast" class="toast align-items-center text-bg-success border-0" role="alert">
+      <div class="d-flex">
+        <div class="toast-body" id="appToastMsg"></div>
+        <button type="button" class="btn-close btn-close-white me-2 m-auto"
+                data-bs-dismiss="toast" aria-label="Fechar"></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Spinner -->
+  <div id="spinner" class="spinner-overlay">
+    <div class="spinner-border text-primary" role="status">
+      <span class="visually-hidden">Carregando...</span>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="https://cdn.plot.ly/plotly-2.32.0.min.js" charset="utf-8"></script>
+  <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+</body>
+</html>
+

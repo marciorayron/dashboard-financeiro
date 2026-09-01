@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <title>Dossiê de Capacidade Financeira CLT</title>
+  <style>
+    body { font-family: "Segoe UI", system-ui, sans-serif; color: #1e293b; margin: 24px; }
+    .banner { background: #0f172a; color: #fff; padding: 14px 18px; border-radius: 8px; display: flex; justify-content: space-between; align-items: center; }
+    .banner h1 { font-size: 20px; margin: 0; }
+    .banner .meta { font-size: 11px; color: #cbd5e1; text-align: right; }
+    h2 { color: #1e293b; font-size: 14px; border-bottom: 2px solid #e2e8f0; padding-bottom: 4px; margin-top: 18px; }
+    table { width: 100%; border-collapse: collapse; margin: 10px 0; }
+    th { background: #1e293b; color: #fff; text-align: left; padding: 6px 8px; font-size: 11px; }
+    td { padding: 6px 8px; border: 1px solid #e2e8f0; font-size: 11px; }
+    tr:nth-child(even) td { background: #f8fafc; }
+    .cards { display: flex; gap: 12px; margin: 12px 0; }
+    .card { flex: 1; color: #fff; border-radius: 8px; padding: 12px; }
+    .card .val { font-size: 18px; font-weight: 700; }
+    .card .lbl { font-size: 10px; opacity: .9; }
+    .c-blue { background: #2563eb; } .c-green { background: #059669; } .c-amber { background: #d97706; }
+    .security { border: 1px solid #cbd5e1; border-radius: 8px; padding: 12px; margin-top: 16px; display: flex; gap: 14px; align-items: center; }
+    .qrbox { border: 2px solid #2563eb; border-radius: 8px; padding: 10px; text-align: center; min-width: 90px; }
+    .hash { font-family: monospace; font-weight: 700; font-size: 12px; }
+    .disclaimer { color: #64748b; font-size: 10px; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <div class="banner">
+    <h1>DOSSIÊ DE CAPACIDADE FINANCEIRA CLT</h1>
+    <div class="meta">Emissão: hoje<br/>Documento: {{ doc_id }}</div>
+  </div>
+
+  <h2>Dados do Trabalhador e Contrato</h2>
+  <table>
+    <tr><th>Nome</th><td>{{ worker_name }}</td><th>Empresa</th><td>{{ company }}</td></tr>
+    <tr><th>Cargo</th><td>{{ profile.job_title or '—' }}</td><th>Admissão</th><td>{{ profile.admission_date or '—' }}</td></tr>
+    <tr><th>Contrato</th><td>{{ 'Horista' if profile.contract_type == 'HORISTA' else 'Mensalista' }}</td><th>Valor</th><td>R$ {{ "%.2f"|format(profile.base_rate) }}{% if profile.contract_type == 'HORISTA' %} /h{% else %} (base){% endif %}</td></tr>
+  </table>
+
+  <div class="cards">
+    <div class="card c-blue"><div class="lbl">Líquido Recorrente Médio</div><div class="val">R$ {{ "%.2f"|format(m6) }}</div><div class="lbl">6m R$ {{ "%.2f"|format(m6) }} · 12m R$ {{ "%.2f"|format(m12) }}</div></div>
+    <div class="card c-green"><div class="lbl">Líquido Base Teórico</div><div class="val">R$ {{ "%.2f"|format(theoretical) }}</div><div class="lbl">Perfil contratual</div></div>
+    <div class="card c-amber"><div class="lbl">Capacidade de Comprometimento</div><div class="val">R$ {{ "%.2f"|format(commitment) }}</div><div class="lbl">30% do líquido médio</div></div>
+  </div>
+
+  <h2>Histórico de Holerites (Últimos 6 Meses)</h2>
+  <table>
+    <tr><th>Competência</th><th>Proventos Fixos</th><th>H.E. / Variável</th><th>Retenções</th><th>Líquido Final</th></tr>
+    {% for b in breakdown %}
+    <tr><td>{{ b.month }}</td><td>R$ {{ "%.2f"|format(b.fixed) }}</td><td>R$ {{ "%.2f"|format(b.variable) }}</td><td>R$ {{ "%.2f"|format(b.ret) }}</td><td><b>R$ {{ "%.2f"|format(b.net) }}</b></td></tr>
+    {% else %}
+    <tr><td colspan="5">Sem dados</td></tr>
+    {% endfor %}
+  </table>
+
+  <div class="security">
+    <div class="qrbox">QR<br/>autenticar<br/>/api/verify/{{ doc_hash }}</div>
+    <div>
+      <div style="font-weight:700;font-size:12px;color:#1e293b;">CÓDIGO DE AUTENTICIDADE</div>
+      <div class="hash">{{ doc_hash }}</div>
+      <div style="font-size:10px;color:#64748b;">Verifique a integridade em /api/verify/&lt;código&gt;. Documento válido apenas quando emitido pelo sistema oficial.</div>
+    </div>
+  </div>
+
+  <div class="disclaimer">DISCLAIMER: Documento informativo gerado automaticamente a partir de contracheques. Valores em R$. Não constitui garantia formal de renda; sujeito a validação bancária.</div>
+</body>
+</html>

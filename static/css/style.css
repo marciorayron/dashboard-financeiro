@@ -1,0 +1,325 @@
+/* =====================================================================
+   style.css
+   Dashboard Financeiro Pessoal — Tema Escuro
+   Estilos sobre o Bootstrap 5 (data-bs-theme="dark").
+   ===================================================================== */
+
+:root {
+  --df-bg: #0f172a;
+  --df-bg-2: #1e293b;
+  --df-surface: #16213a;
+  --df-border: #2b3a55;
+  --df-text: #e2e8f0;
+  --df-muted: #94a3b8;
+  --df-primary: #3b82f6;
+  --df-success: #22c55e;
+  --df-danger: #ef4444;
+  --df-radius: 14px;
+}
+
+body {
+  background-color: var(--df-bg);
+  color: var(--df-text);
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+.app-body {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* =====================================================================
+   Páginas de autenticação (login/register)
+   ===================================================================== */
+.auth-body {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background:
+    radial-gradient(1000px 500px at 10% -10%, rgba(59, 130, 246, 0.25), transparent),
+    radial-gradient(800px 400px at 110% 110%, rgba(34, 197, 94, 0.15), transparent),
+    var(--df-bg);
+}
+
+.auth-wrapper {
+  width: 100%;
+  max-width: 420px;
+  padding: 1rem;
+}
+
+.auth-card {
+  background: var(--df-surface);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius);
+  padding: 2rem 1.75rem;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.45);
+}
+
+.auth-logo {
+  font-size: 2.6rem;
+  color: var(--df-primary);
+}
+
+/* =====================================================================
+   Navbar
+   ===================================================================== */
+.app-navbar {
+  background: var(--df-surface);
+  border-bottom: 1px solid var(--df-border);
+}
+
+.app-navbar .navbar-brand {
+  color: var(--df-text);
+  font-weight: 600;
+}
+
+.app-navbar .navbar-brand i {
+  color: var(--df-primary);
+}
+
+/* =====================================================================
+   Cards KPI
+   ===================================================================== */
+.kpi-card {
+  background: var(--df-surface);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius);
+}
+
+.kpi-title {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--df-muted);
+  margin-bottom: 0.4rem;
+}
+
+.kpi-value {
+  font-size: 1.7rem;
+  font-weight: 700;
+  color: var(--df-text);
+  line-height: 1.1;
+}
+
+.kpi-value.success { color: var(--df-success); }
+.kpi-value.danger  { color: var(--df-danger); }
+
+.kpi-subtitle {
+  margin-top: 0.3rem;
+}
+
+/* =====================================================================
+   Painéis
+   ===================================================================== */
+.panel {
+  background: var(--df-surface);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius);
+}
+
+.panel-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--df-text);
+}
+
+/* =====================================================================
+   Upload
+   ===================================================================== */
+.upload-dropzone {
+  border: 2px dashed var(--df-border);
+  border-radius: var(--df-radius);
+  background: var(--df-bg-2);
+  padding: 0.5rem 1rem;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.2s ease, background-color 0.2s ease;
+  min-height: 48px;
+  max-height: 100px;
+}
+
+.upload-dropzone:hover,
+.upload-dropzone.dragover {
+  border-color: var(--df-primary);
+  background-color: rgba(59, 130, 246, 0.08);
+}
+
+.upload-dropzone .upload-icon {
+  font-size: 1.35rem;
+  line-height: 1;
+}
+
+/* Banner compacto no topo do dashboard. */
+.upload-banner {
+  background: var(--df-surface);
+}
+
+/* =====================================================================
+   Accordion do histórico (colapsável)
+   ===================================================================== */
+.history-accordion {
+  overflow: hidden;
+}
+
+.history-accordion > .history-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+  cursor: pointer;
+  list-style: none;
+  color: var(--df-text);
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.history-accordion > .history-summary::-webkit-details-marker {
+  display: none;
+}
+
+.history-accordion > .history-summary:hover {
+  background-color: var(--df-bg-2);
+}
+
+.history-accordion > .history-summary::after {
+  content: "\25BE"; /* ▾ */
+  color: var(--df-muted);
+  font-size: 0.8rem;
+  transition: transform 0.2s ease;
+}
+
+.history-accordion[open] > .history-summary::after {
+  transform: rotate(180deg);
+}
+
+.history-hint {
+  white-space: nowrap;
+}
+
+/* =====================================================================
+   Gráficos
+   ===================================================================== */
+.chart-container {
+  position: relative;
+  width: 100%;
+  height: 360px;
+  min-height: 340px;
+}
+
+/* =====================================================================
+   Tabelas
+   ===================================================================== */
+.table {
+  color: var(--df-text);
+}
+
+.table thead th {
+  color: var(--df-muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  border-color: var(--df-border);
+}
+
+.table-hover tbody tr:hover {
+  background-color: var(--df-bg-2);
+}
+
+.raw-text {
+  background: var(--df-bg-2);
+  border: 1px solid var(--df-border);
+  border-radius: 8px;
+  padding: 0.75rem;
+  font-size: 0.8rem;
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* =====================================================================
+   Spinner / toast
+   ===================================================================== */
+.spinner-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.7);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 1060;
+}
+
+.spinner-overlay.active {
+  display: flex;
+}
+
+.footer {
+  color: var(--df-muted);
+  font-size: 0.85rem;
+  border-top: 1px solid var(--df-border);
+  margin-top: auto;
+}
+
+/* =====================================================================
+   Layout orientado à decisão
+   ===================================================================== */
+
+/* Cor de destaque para o KPI de vulnerabilidade. */
+.kpi-value.warning { color: var(--df-warning, #f59e0b); }
+
+/* Slider de horas extras com ticks visuais a cada 30h (25% do range). */
+.range-with-ticks {
+  background-image:
+    linear-gradient(to right, var(--df-border) 0 1px, transparent 1px 24.9%),
+    linear-gradient(to right, var(--df-primary) 0 1px, transparent 1px 25%),
+    linear-gradient(to right, var(--df-border) 0 1px, transparent 1px 49.9%),
+    linear-gradient(to right, var(--df-primary) 0 1px, transparent 1px 50%),
+    linear-gradient(to right, var(--df-border) 0 1px, transparent 1px 74.9%),
+    linear-gradient(to right, var(--df-primary) 0 1px, transparent 1px 75%),
+    linear-gradient(to right, var(--df-border) 0 1px, transparent 1px 99%),
+    linear-gradient(to right, var(--df-primary) 0 1px, transparent 1px 100%);
+  background-size: 100% 10px;
+  background-repeat: no-repeat;
+  background-position: center;
+}
+.range-with-ticks:focus {
+  box-shadow: 0 0 0 0.25rem rgba(59, 130, 246, 0.15);
+}
+
+/* Central de Inconsistências & Auditoria — lista rolável. */
+.anomaly-list {
+  max-height: 320px;
+  overflow-y: auto;
+  border-top: 1px solid var(--df-border);
+  scrollbar-width: thin;
+  scrollbar-color: var(--df-border) transparent;
+}
+.anomaly-list::-webkit-scrollbar { width: 8px; }
+.anomaly-list::-webkit-scrollbar-thumb {
+  background: var(--df-border);
+  border-radius: 4px;
+}
+
+.anomaly-row {
+  background: var(--df-bg-2);
+  border-bottom: 1px solid var(--df-border) !important;
+  padding: 0.6rem 0.75rem;
+}
+.anomaly-sev { text-transform: uppercase; font-size: 0.66rem; }
+.anomaly-cat { font-size: 0.66rem; text-transform: capitalize; }
+.anomaly-date { white-space: nowrap; }
+.anomaly-title {
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: var(--df-text);
+}
+.anomaly-desc {
+  font-size: 0.78rem;
+  color: var(--df-muted);
+  line-height: 1.35;
+}
+.anomaly-var { font-size: 0.68rem; white-space: nowrap; }

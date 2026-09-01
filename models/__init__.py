@@ -1,0 +1,60 @@
+"""
+models
+======
+Domínio de modelos de dados da aplicação.
+"""
+from .profile import (
+    CONTRACT_TYPES,
+    UserProfile,
+    UserProfileHistory,
+    create_profiles_table,
+    create_user_profile_history_table,
+    load_profile,
+    load_profile_history,
+    resolve_profile_for_date,
+    save_profile,
+    to_dict,
+)
+from .user import (
+    ROLES,
+    ROLE_ADMIN,
+    ROLE_USER,
+    User,
+    create_user_table,
+    ensure_user_role_column,
+    get_user,
+    get_user_by_email,
+    is_admin,
+    list_users,
+    reset_user_password,
+    set_user_active,
+    set_user_role,
+    to_dict as user_to_dict,
+)
+
+__all__ = [
+    "CONTRACT_TYPES",
+    "UserProfile",
+    "UserProfileHistory",
+    "create_profiles_table",
+    "create_user_profile_history_table",
+    "load_profile",
+    "load_profile_history",
+    "resolve_profile_for_date",
+    "save_profile",
+    "to_dict",
+    "ROLES",
+    "ROLE_ADMIN",
+    "ROLE_USER",
+    "User",
+    "create_user_table",
+    "ensure_user_role_column",
+    "get_user",
+    "get_user_by_email",
+    "is_admin",
+    "list_users",
+    "reset_user_password",
+    "set_user_active",
+    "set_user_role",
+    "user_to_dict",
+]

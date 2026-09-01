@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="pt-BR" data-bs-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{ title }} &middot; Dashboard Financeiro</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+</head>
+<body class="app-body">
+
+  <!-- ======================= Navbar ======================= -->
+  <nav class="navbar navbar-expand-lg app-navbar mb-4">
+    <div class="container">
+      <a class="navbar-brand" href="{{ url_for('admin.index') }}">
+        <i class="bi bi-speedometer2 me-2"></i>Administração
+      </a>
+      <div class="d-flex align-items-center gap-3">
+        <span class="navbar-text small d-none d-md-inline">
+          <i class="bi bi-person-circle me-1"></i>{{ user_name }} (admin)
+        </span>
+        <a href="{{ url_for('main.dashboard') }}" class="btn btn-sm btn-outline-secondary">
+          <i class="bi bi-graph-up-arrow me-1"></i>Dashboard
+        </a>
+        <a href="{{ url_for('auth.logout') }}" class="btn btn-sm btn-outline-danger">
+          <i class="bi bi-box-arrow-right me-1"></i>Sair
+        </a>
+      </div>
+    </div>
+  </nav>
+
+  <main class="container pb-5">
+    <!-- Mensagens flash -->
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          <div class="alert alert-{{ category }} alert-dismissible fade show py-2" role="alert">
+            {{ message }}
+            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Fechar"></button>
+          </div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    <!-- Métricas globais -->
+    <div class="row g-3 mb-4" id="adminMetrics">
+      <div class="col-12 col-md-4">
+        <div class="card kpi-card h-100">
+          <div class="card-body">
+            <div class="kpi-title">Total de Usuários</div>
+            <div class="kpi-value" id="metricUsers">—</div>
+            <div class="kpi-subtitle text-secondary small" id="metricAdmins"></div>
+          </div>
+        </div>
+      </div>
+      <div class="col-12 col-md-4">
+        <div class="card kpi-card h-100">
+          <div class="card-body">
+            <div class="kpi-title">Holerites Processados</div>
+            <div class="kpi-value" id="metricPaystubs">—</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-12 col-md-4">
+        <div class="card kpi-card h-100">
+          <div class="card-body">
+            <div class="kpi-title">Erros de Parsing (não resolvidos)</div>
+            <div class="kpi-value" id="metricErrors">—</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Saúde do sistema (Database Status / Storage) -->
+    <div class="card panel mb-4">
+      <div class="card-body">
+        <div class="d-flex align-items-center justify-content-between mb-3">
+          <div class="panel-title"><i class="bi bi-heart-pulse me-2"></i>Saúde do Sistema</div>
+          <button class="btn btn-sm btn-outline-secondary" onclick="Admin.refreshHealth()">
+            <i class="bi bi-arrow-clockwise me-1"></i>Atualizar
+          </button>
+        </div>
+        <div class="row g-3">
+          <div class="col-6 col-lg-3">
+            <div class="border rounded p-2 text-center h-100">
+              <div class="small text-secondary">Banco de Dados</div>
+              <div class="fw-bold" id="healthDb">—</div>
+            </div>
+          </div>
+          <div class="col-6 col-lg-3">
+            <div class="border rounded p-2 text-center h-100">
+              <div class="small text-secondary">Usuários Ativos</div>
+              <div class="fw-bold" id="healthActiveUsers">—</div>
+            </div>
+          </div>
+          <div class="col-6 col-lg-3">
+            <div class="border rounded p-2 text-center h-100">
+              <div class="small text-secondary">PDFs Armazenados</div>
+              <div class="fw-bold" id="healthPdfs">—</div>
+            </div>
+          </div>
+          <div class="col-6 col-lg-3">
+            <div class="border rounded p-2 text-center h-100">
+              <div class="small text-secondary">Uso de Armazenamento</div>
+              <div class="fw-bold" id="healthStorage">—</div>
+            </div>
+          </div>
+        </div>
+        <div class="small text-secondary mt-2" id="healthDbPath"></div>
+      </div>
+    </div>
+
+    <!-- Log de auditoria: erros de parsing de PDFs -->
+    <div class="card panel mb-4">
+      <div class="card-body">
+        <div class="d-flex align-items-center justify-content-between mb-3">
+          <div class="panel-title"><i class="bi bi-bug me-2"></i>Erros de Parsing (Auditoria)</div>
+          <div class="d-flex gap-2">
+            <button class="btn btn-sm btn-outline-secondary" onclick="Admin.loadErrors()">
+              <i class="bi bi-arrow-clockwise me-1"></i>Atualizar
+            </button>
+          </div>
+        </div>
+        <div id="parseErrorsEmpty" class="text-center text-secondary small py-4 d-none">
+          <i class="bi bi-check-circle text-success me-1"></i>Nenhum erro de parsing pendente.
+        </div>
+        <div class="table-responsive">
+          <table class="table table-sm table-hover align-middle d-none" id="parseErrorsTable">
+            <thead>
+              <tr>
+                <th>Data</th>
+                <th>Usuário</th>
+                <th>Arquivo</th>
+                <th>Erro</th>
+                <th>Detalhes</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Gestão de usuários -->
+    <div class="card panel mb-4">
+      <div class="card-body">
+        <div class="d-flex align-items-center justify-content-between mb-3">
+          <div class="panel-title"><i class="bi bi-people me-2"></i>Gestão de Usuários</div>
+          <button class="btn btn-sm btn-outline-secondary" onclick="Admin.loadUsers()">
+            <i class="bi bi-arrow-clockwise me-1"></i>Atualizar
+          </button>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-hover align-middle" id="usersTable">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Nome</th>
+                <th>E-mail</th>
+                <th>Papel</th>
+                <th>Status</th>
+                <th>Holerites</th>
+                <th>Ações</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Impostos & Configurações -->
+    <div class="card panel mb-4">
+      <div class="card-body">
+        <div class="panel-title mb-3"><i class="bi bi-calculator me-2"></i>Impostos &amp; Configurações</div>
+
+        <ul class="nav nav-tabs mb-3" id="settingsTabs" role="tablist">
+          <li class="nav-item" role="presentation">
+            <button class="nav-link active" id="tab-taxes" data-bs-toggle="tab" data-bs-target="#pane-taxes" type="button" role="tab">Faixas de INSS/IRRF</button>
+          </li>
+          <li class="nav-item" role="presentation">
+            <button class="nav-link" id="tab-catalog" data-bs-toggle="tab" data-bs-target="#pane-catalog" type="button" role="tab">Rubricas Padrão</button>
+          </li>
+        </ul>
+
+        <div class="tab-content" id="settingsTabContent">
+          <!-- Faixas de impostos -->
+          <div class="tab-pane fade show active" id="pane-taxes" role="tabpanel">
+            <div class="row g-4">
+              <div class="col-lg-6">
+                <div class="panel-title small text-secondary mb-2">INSS Progressivo</div>
+                <div id="inssEditor" class="mb-2"></div>
+                <button class="btn btn-sm btn-outline-primary" onclick="Admin.addRow('inss')">
+                  <i class="bi bi-plus-lg me-1"></i>Adicionar faixa
+                </button>
+              </div>
+              <div class="col-lg-6">
+                <div class="panel-title small text-secondary mb-2">IRRF Progressivo</div>
+                <div id="irrfEditor" class="mb-2"></div>
+                <button class="btn btn-sm btn-outline-primary" onclick="Admin.addRow('irrf')">
+                  <i class="bi bi-plus-lg me-1"></i>Adicionar faixa
+                </button>
+              </div>
+            </div>
+            <div class="mt-3 d-flex align-items-center gap-3 flex-wrap">
+              <label class="form-label mb-0">
+                Dedução por dependente (R$):
+                <input type="number" step="0.01" min="0" class="form-control form-control-sm d-inline-block w-auto" id="dependentDeduction" />
+              </label>
+              <button class="btn btn-sm btn-primary ms-auto" onclick="Admin.saveTaxes()">
+                <i class="bi bi-check-lg me-1"></i>Salvar faixas
+              </button>
+            </div>
+          </div>
+
+
+          <!-- Catálogo de rubricas -->
+          <div class="tab-pane fade" id="pane-catalog" role="tabpanel">
+            <div class="row g-2 mb-3">
+              <div class="col-md-3"><input class="form-control form-control-sm" id="catCodigo" placeholder="Código (ex.: 9999)" /></div>
+              <div class="col-md-5"><input class="form-control form-control-sm" id="catDescricao" placeholder="Descrição" /></div>
+              <div class="col-md-2">
+                <select class="form-select form-select-sm" id="catTipo">
+                  <option value="PROVENTO">PROVENTO</option>
+                  <option value="DESCONTO">DESCONTO</option>
+                </select>
+              </div>
+              <div class="col-md-2 d-grid">
+                <button class="btn btn-sm btn-primary" onclick="Admin.addCatalog()">
+                  <i class="bi bi-plus-lg me-1"></i>Adicionar
+                </button>
+              </div>
+            </div>
+            <div class="table-responsive">
+              <table class="table table-sm table-hover" id="catalogTable">
+                <thead><tr><th>Código</th><th>Descrição</th><th>Tipo</th><th></th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+
+    <!-- Histórico de revisões (validação da taxa por competência) -->
+    <div class="card panel mb-4">
+      <div class="card-body">
+        <div class="panel-title mb-3"><i class="bi bi-clock-history me-2"></i>Validação do Histórico de Perfil</div>
+        <div class="row g-2 align-items-end">
+          <div class="col-md-4">
+            <label class="form-label small">Usuário</label>
+            <select class="form-select form-select-sm" id="histUser"></select>
+          </div>
+          <div class="col-md-4">
+            <label class="form-label small">Competência (YYYY-MM)</label>
+            <input class="form-control form-control-sm" id="histMes" placeholder="2024-06" />
+          </div>
+          <div class="col-md-4 d-grid">
+            <button class="btn btn-sm btn-outline-primary" onclick="Admin.checkHistory()">
+              <i class="bi bi-search me-1"></i>Avaliar taxa ativa
+            </button>
+          </div>
+        </div>
+        <div id="histResult" class="mt-3 small text-secondary"></div>
+        <div id="histTableWrap" class="mt-2 d-none">
+          <div class="panel-title small text-secondary mb-1">Revisões registradas</div>
+          <div class="table-responsive">
+            <table class="table table-sm" id="histTable">
+              <thead><tr><th>Vigência</th><th>Cargo</th><th>Contrato</th><th>Taxa</th><th>Horas</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Toast -->
+  <div class="toast-container position-fixed bottom-0 end-0 p-3">
+    <div id="adminToast" class="toast align-items-center text-bg-success border-0" role="alert">
+      <div class="d-flex">
+        <div class="toast-body" id="adminToastMsg"></div>
+        <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Fechar"></button>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script>window.ADMIN_ME_ID = {{ current_user_id | tojson }};</script>
+  <script src="{{ url_for('static', filename='js/admin.js') }}"></script>
+</body>
+</html>
+
