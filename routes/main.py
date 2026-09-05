@@ -47,6 +47,7 @@ def dashboard():
         "index.html",
         title="Dashboard Financeiro Pessoal",
         user_name=session.get("user_name", "Usuário"),
+        user_plan=session.get("user_plan", "free"),
         is_admin=user_is_admin,
         deepseek_enabled=bool(current_app.config.get("DEEPSEEK_API_KEY")),
     )

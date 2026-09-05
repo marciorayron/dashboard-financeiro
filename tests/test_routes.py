@@ -156,3 +156,87 @@ def test_export_is_scoped_to_user(client, register_user, login, seed_paystub):
     resp = client.get("/api/export?format=csv")
     body = resp.data.decode("utf-8-sig")
     assert "2024-01" not in body
+# ---------------------------------------------------------------------
+# Explicação de cards com IA (✨) — cota Freemium/Pro
+# ---------------------------------------------------------------------
+def _ai_used(client):
+    return client.get("/api/plan").get_json()["ai"]["used"]
+
+
+def _fill_usage(db, user_id, count):
+    for _ in range(int(count)):
+        db.execute("INSERT INTO ai_usage_logs (user_id) VALUES (?)", [user_id])
+    db.commit()
+
+
+def test_explain_card_success_decrements_quota(client, register_user, login):
+    register_user(email="card_ok@example.com")
+    login(email="card_ok@example.com")
+
+    before = _ai_used(client)
+    resp = client.post(
+        "/api/analytics/explain-card",
+        json={"card_id": "recurrent_net", "month": "", "company": ""},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["status"] == "ok"
+    assert data["card_id"] == "recurrent_net"
+    # 3 bullets ("O que representa", "Insight do período", "Como é calculado").
+    md = data["markdown"]
+    assert md.count("- **O que representa:**") == 1
+    assert md.count("- **Insight do período:**") == 1
+    assert md.count("- **Como é calculado:**") == 1
+    # Consumiu 1 crédito da cota.
+    assert _ai_used(client) == before + 1
+
+
+def test_explain_card_free_reaches_rate_limit_429(client, register_user, login, db, user_id_by_email):
+    email = "card_free@example.com"
+    register_user(email=email)
+    login(email=email)
+    uid = user_id_by_email(email)
+    _fill_usage(db, uid, 5)  # limite Free: 5 consultas / 24h
+
+    resp = client.post(
+        "/api/analytics/explain-card",
+        json={"card_id": "projecao_anual", "month": "2026-04", "company": ""},
+    )
+    assert resp.status_code == 429
+    body = resp.get_json()
+    assert body["status"] == "rate_limit_exceeded"
+    assert "atingiu o limite" in body["message"]
+    assert "retry_after_seconds" in body
+
+
+def test_explain_card_pro_reaches_rate_limit_429(client, register_user, login, db, user_id_by_email, app):
+    email = "card_pro@example.com"
+    register_user(email=email)
+    login(email=email)
+    uid = user_id_by_email(email)
+    with app.app_context():
+        from models.user import set_user_plan
+        set_user_plan(get_db(), uid, "pro")
+    client.get("/logout")
+    login(email=email)  # atualiza a sessão com o plano Pro
+
+    _fill_usage(db, uid, 15)  # limite Pro: 15 consultas / 1h
+    resp = client.post(
+        "/api/analytics/explain-card",
+        json={"card_id": "salario_hora", "month": "2026-05", "company": ""},
+    )
+    assert resp.status_code == 429
+    body = resp.get_json()
+    assert body["status"] == "rate_limit_exceeded"
+    assert "retry_after_seconds" in body
+
+
+def test_explain_card_unknown_card_400(client, register_user, login):
+    register_user(email="card_bad@example.com")
+    login(email="card_bad@example.com")
+    resp = client.post(
+        "/api/analytics/explain-card",
+        json={"card_id": "inexistente", "month": "", "company": ""},
+    )
+    assert resp.status_code == 400
+

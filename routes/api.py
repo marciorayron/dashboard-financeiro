@@ -12,6 +12,10 @@ Endpoints (todos protegidos por `login_required` e escopados pelo
   * GET  /api/descontos            -> descontos por rubrica.
   * GET  /api/empresas             -> lista de empregadores do usuário.
   * GET  /api/analytics/advanced   -> métricas avançadas (overtime, taxas, base).
+  * GET  /api/analytics/audit      -> auditoria/anomalias de paystubs.
+  * POST /api/analytics/ask-ai     -> pergunta livre à IA (contextualizada).
+  * POST /api/analytics/explain-anomaly -> explicação de inconsistência com IA.
+  * GET  /api/plan                 -> plano (Free/Pro) e consumo do usuário.
   * POST /api/admin/fix-classification -> corrige rubricas 'provento' e recalcula totais.
   * GET  /api/holerites            -> lista os holerites do usuário.
   * GET  /api/holerites/<id>       -> detalhe (rubricas + texto bruto).
@@ -29,11 +33,32 @@ from pathlib import Path
 
 import pandas as pd
 
-from flask import Blueprint, current_app, jsonify, request, send_file
+from flask import (
+    Blueprint,
+    current_app,
+    jsonify,
+    request,
+    send_file,
+    session,
+)
 
 from database.connection import get_db
 from routes.auth import admin_required, current_user_id, login_required
-from services import analytics_service
+from services import ai_service, analytics_service
+from services.ai_service import (
+    AIValidationError,
+    PromptInjectionError,
+    ask_ai as ai_ask_question,
+    enforce_ai_rate_limit,
+    explain_anomaly as ai_explain_anomaly,
+    get_ai_usage_summary,
+    log_ai_usage,
+    log_blocked_attempt,
+)
+from services.auth_service import (
+    PaystubLimitError,
+    enforce_paystub_upload_limit,
+)
 from services.db_service import get_catalog_map
 from services.deepseek_service import (
     _MANDATORY_DESCONTO,
@@ -57,6 +82,20 @@ def _allowed_file(filename: str) -> bool:
     """Verifica se a extensão do arquivo é permitida (pdf)."""
     allowed = current_app.config.get("ALLOWED_EXTENSIONS", {"pdf"})
     return "." in filename and filename.rsplit(".", 1)[1].lower() in allowed
+
+
+def _has_pdf_magic(content: bytes) -> bool:
+    """
+    Verifica a assinatura real de um PDF ('%PDF-') no início do conteúdo.
+
+    Proteção contra MIME spoofing: um arquivo apenas renomeado para '.pdf'
+    (ex.: script/HTML/binary) não avança para o parsing — é rejeitado antes
+    com HTTP 400, sem ser persistido nem registrado como erro de parsing.
+    Toleramos apenas espaços/linhas em branco iniciais (headers legítimos).
+    """
+    if not content:
+        return False
+    return content.lstrip()[:5] == b"%PDF-"
 
 
 def _json_dumps(data) -> str:
@@ -92,6 +131,19 @@ def _load_holerite_or_404(holerite_id: int, user_id: int):
     return row
 
 
+def _limit_error_response(exc):
+    """
+    Converte exceções de limite/validação (AI / plano) em resposta JSON.
+
+    Usado para traduzir `PaystubLimitError`, `RateLimitError`,
+    `QueryTooLongError` e `PromptInjectionError` nos códigos HTTP corretos
+    (402/429/400) com o payload de erro padronizado.
+    """
+    payload = getattr(exc, "payload", None)
+    status = getattr(exc, "status_code", 400)
+    return jsonify(payload() if callable(payload) else {"error": "ERRO", "message": str(exc)}), status
+
+
 def _catalog_enforced_tipo(db, codigo) -> str:
     """
     Retorna o tipo ('PROVENTO'/'DESCONTO') forçado pelo catálogo para um código.
@@ -123,6 +175,12 @@ def upload_holerite():
     """
     user_id = current_user_id()
 
+    # Política Freemium: usuário do plano Gratuito tem teto de 3 holerites.
+    try:
+        enforce_paystub_upload_limit(get_db(), user_id)
+    except PaystubLimitError as exc:
+        return _limit_error_response(exc)
+
     file = request.files.get("file")
     if not file or not file.filename:
         return jsonify({"error": "Nenhum arquivo enviado."}), 400
@@ -131,6 +189,19 @@ def upload_holerite():
         return jsonify({"error": "Formato inválido. Envie um PDF."}), 400
 
     content = file.read()
+
+    # Validação de conteúdo (anti-spoofing / MIME falso): só aceita bytes que
+    # realmente comecem com a assinatura de PDF. Um arquivo arbitrário apenas
+    # renomeado para '.pdf' é rejeitado com HTTP 400 ANTES de qualquer parsing.
+    if not _has_pdf_magic(content):
+        return (
+            jsonify(
+                {
+                    "error": "Arquivo inválido. O conteúdo enviado não é um PDF válido."
+                }
+            ),
+            400,
+        )
 
     # Evita documentos duplicados por hash (por usuário).
     file_hash = compute_file_hash(content)
@@ -142,6 +213,11 @@ def upload_holerite():
     if existing:
         return jsonify({"error": "Este holerite já foi importado."}), 409
 
+    # O PDF persistido em disco é tratado como arquivo temporário do pipeline:
+    # se a transação NÃO for concluída (falha/rollback), ele é removido no
+    # `finally` — nunca deixamos um PDF órfão no disco (LGPD/minimização).
+    stored_path = None
+    committed = False
     try:
         # 1) Extrai o texto bruto do PDF.
         raw_text = extract_text_from_bytes(content)
@@ -215,6 +291,7 @@ def upload_holerite():
             )
 
         db.commit()
+        committed = True
         return jsonify(
             {
                 "message": "Holerite importado com sucesso.",
@@ -245,6 +322,17 @@ def upload_holerite():
         except Exception:  # noqa: BLE001
             logger.exception("Falha ao registrar erro de parsing no log")
         return jsonify({"error": f"Falha ao processar: {exc}"}), 500
+    finally:
+        # Remove o arquivo temporário do pipeline quando a transação não foi
+        # concluída (commit falhou/rollback). Em sucesso o PDF é mantido no
+        # armazenamento oficial referenciado por `holerites.file_path`.
+        if stored_path is not None and not committed and stored_path.exists():
+            try:
+                stored_path.unlink()
+            except OSError:
+                logger.warning(
+                    "Não foi possível remover o PDF temporário %s", stored_path
+                )
 
 
 # ---------------------------------------------------------------------
@@ -334,9 +422,219 @@ def analytics_overtime_impact():
 @api_bp.route("/analytics/audit", methods=["GET"])
 @login_required
 def analytics_audit():
-    """Auditoria de paystubs e detecção de anomalias."""
+    """Auditoria de paystubs e detecção de anomalias (escopo mes/company)."""
     user_id = current_user_id()
-    return jsonify(analytics_service.audit_paystub_anomalies(user_id))
+    return jsonify(
+        analytics_service.audit_paystub_anomalies(
+            user_id,
+            mes_referencia=request.args.get("mes"),
+            company_name=request.args.get("company"),
+        )
+    )
+
+
+@api_bp.route("/plan", methods=["GET"])
+@login_required
+def get_plan():
+    """Informações do plano e de consumo do usuário (para o frontend)."""
+    user_id = current_user_id()
+    db = get_db()
+    from services.auth_service import get_paystub_limit, count_user_paystubs
+
+    plan = ai_service.get_user_plan(db, user_id)
+    paystub_limit = get_paystub_limit(db, plan)
+    return jsonify(
+        {
+            "plan": plan,
+            "paystub_count": count_user_paystubs(db, user_id),
+            "paystub_limit": paystub_limit,
+            "ai": get_ai_usage_summary(db, user_id),
+        }
+    )
+
+
+@api_bp.route("/analytics/explain-anomaly", methods=["POST"])
+@login_required
+def analytics_explain_anomaly():
+    """
+    Explica uma inconsistência específica com auxílio de IA.
+
+    Corpo JSON: objeto de anomalia (ex.: categoria, baseline, delta/título,
+    descrição, mês, impacto monetário). Retorna uma explicação curta (2 frases)
+    com ação recomendada.
+    """
+    user_id = current_user_id()
+    db = get_db()
+    body = request.get_json(silent=True) or {}
+    if not body or not isinstance(body, dict):
+        return jsonify({"error": "Anomalia inválida."}), 400
+
+    try:
+        # Rate limiting (Freemium) antes de consumir tokens da IA.
+        enforce_ai_rate_limit(db, user_id)
+        explanation = ai_explain_anomaly(
+            body,
+            api_key=current_app.config.get("DEEPSEEK_API_KEY"),
+            base_url=current_app.config.get("DEEPSEEK_BASE_URL"),
+        )
+        log_ai_usage(db, user_id)  # registra apenas chamadas válidas
+    except AIValidationError as exc:
+        if isinstance(exc, PromptInjectionError):
+            log_blocked_attempt(
+                db, user_id, "prompt_injection",
+                detail=json.dumps(body, ensure_ascii=False)[:200],
+            )
+        return _limit_error_response(exc)
+
+    return jsonify({"explanation": explanation})
+
+
+@api_bp.route("/analytics/ask-ai", methods=["POST"])
+@login_required
+def analytics_ask_ai():
+    """
+    Pergunta livre à IA, contextualizada com o resumo dos holerites do usuário.
+
+    Corpo JSON: {"question": "..."} (máx. 200 caracteres). Retorna uma
+    resposta concisa baseada nos dados reais do dashboard.
+    """
+    user_id = current_user_id()
+    db = get_db()
+    body = request.get_json(silent=True) or {}
+    question = (body.get("question") or "").strip()
+
+    try:
+        # Valida tamanho/injeção ANTES de consumir tokens.
+        from services.ai_service import sanitize_query
+        sanitize_query(question)
+        # Rate limiting (Freemium) antes de consumir tokens da IA.
+        enforce_ai_rate_limit(db, user_id)
+        # Contexto rico: breakdown mês a mês + agregados (permite perguntas
+        # temporais como "qual o menor/maior salário e em quais meses?").
+        # LGPD: anonimiza PII (nome, CPF, empresa etc.) antes de enviar à IA.
+        context = ai_service.anonymize_payload(
+            analytics_service.build_ai_paystub_context(user_id)
+        )
+        answer = ai_ask_question(
+            question,
+            context=context,
+            api_key=current_app.config.get("DEEPSEEK_API_KEY"),
+            base_url=current_app.config.get("DEEPSEEK_BASE_URL"),
+        )
+        log_ai_usage(db, user_id)  # registra apenas chamadas válidas
+    except AIValidationError as exc:
+        if isinstance(exc, PromptInjectionError):
+            log_blocked_attempt(
+                db, user_id, "prompt_injection",
+                detail=(question or "")[:200],
+            )
+        return _limit_error_response(exc)
+
+    return jsonify({"answer": answer})
+
+
+@api_bp.route("/analytics/explain-card", methods=["POST"])
+@login_required
+def analytics_explain_card():
+    """Explica um card com IA (consumindo crédito Freemium/Pro)."""
+    from services.ai_service import (
+        RateLimitError,
+        enforce_ai_rate_limit,
+        explain_card as ai_explain_card,
+        get_ai_cooldown_seconds,
+        get_ai_usage_summary,
+        log_ai_usage,
+    )
+
+    user_id = current_user_id()
+    body = request.get_json(silent=True) or {}
+    card_id = (body.get("card_id") or "").strip()
+    if not card_id:
+        return jsonify({"status": "invalid_card", "message": "Informe o card_id."}), 400
+
+    db = get_db()
+    # 1) Checa a cota IA do plano ANTES de qualquer cálculo (429 se estourou).
+    try:
+        enforce_ai_rate_limit(db, user_id)
+    except RateLimitError:
+        cooldown = get_ai_cooldown_seconds(db, user_id)
+        return (
+            jsonify(
+                {
+                    "status": "rate_limit_exceeded",
+                    "message": "Você atingiu o limite de consultas de IA para o seu plano.",
+                    "retry_after_seconds": cooldown,
+                    **get_ai_usage_summary(db, user_id),
+                }
+            ),
+            429,
+        )
+
+    # 2) Monta o payload escopado do card.
+    try:
+        result = analytics_service.get_card_explanation(
+            db,
+            user_id,
+            card_id,
+            mes_referencia=(body.get("month") or "").strip() or None,
+            company_name=(body.get("company") or "").strip() or None,
+        )
+    except ValueError:
+        return jsonify(
+            {"status": "invalid_card", "message": "Card não suportado para explicação."}
+        ), 400
+
+    # LGPD: garante que o payload do card que segue à IA não contém PII.
+    result = ai_service.anonymize_payload(result)
+
+    # 3) Invoca a IA (best-effort) quando chave configurada; offline mantém o
+    #    texto determinístico. Consome 1 crédito da cota do plano.
+    api_key = current_app.config.get("DEEPSEEK_API_KEY")
+    if api_key:
+        refined = ai_explain_card(
+            result["title"],          # rótulo human-readable, NUNCA a chave crua
+            result["markdown"],       # contexto com os valores numéricos reais
+            api_key=api_key,
+            base_url=current_app.config.get("DEEPSEEK_BASE_URL"),
+        )
+        if refined and not refined.startswith("Não foi possível"):
+            result["markdown"] = analytics_service.humanize_explanation(refined)
+    log_ai_usage(db, user_id)
+
+    # Saneamento final de qualquer saída (determinística ou da IA).
+    markdown = analytics_service.humanize_explanation(result["markdown"])
+
+    return jsonify(
+        {
+            "status": "ok",
+            "card_id": result["card_id"],
+            "title": result["title"],
+            "markdown": markdown,
+            **get_ai_usage_summary(db, user_id),
+        }
+    )
+
+
+@api_bp.route("/analytics/inconsistency-breakdown", methods=["GET"])
+@login_required
+def analytics_inconsistency_breakdown():
+    """Quebra itemizada do total R$ das inconsistências (modal / relatório)."""
+    user_id = current_user_id()
+    return jsonify(analytics_service.get_inconsistency_breakdown(user_id))
+
+
+@api_bp.route("/analytics/tax-projection", methods=["GET"])
+@login_required
+def analytics_tax_projection():
+    """Projeção tributária anual acumulada (INSS & IRRF) até o fim do ano.
+
+    Query params:
+        * `method`: 'average' (média YTD), 'trend' (últimos 3M) ou
+          'last_month' (run-rate do último paystub). Padrão: 'average'.
+    """
+    user_id = current_user_id()
+    method = request.args.get("method", "average")
+    return jsonify(analytics_service.get_tax_projection(user_id, method=method))
 
 
 @api_bp.route("/analytics/projection", methods=["GET"])
@@ -514,6 +812,40 @@ def holerite_delete(holerite_id: int):
             logger.warning("Não foi possível remover o arquivo %s", row["file_path"])
 
     return jsonify({"message": "Holerite excluído.", "id": holerite_id})
+
+
+# ---------------------------------------------------------------------
+# Direitos do titular (LGPD, Art. 18) — portabilidade & esquecimento
+# ---------------------------------------------------------------------
+@api_bp.route("/user/account", methods=["DELETE"])
+@login_required
+def user_delete_account():
+    """Hard delete transacional da conta e de todos os dados do usuário logado.
+
+    Remove paystubs, rubricas, perfil/histórico, logs de IA e erros de parse,
+    além dos PDFs em disco — depois limpa a sessão (LGPD, Art. 18 - exclusão).
+    """
+    from services.user_service import delete_user_account
+
+    user_id = current_user_id()
+    db = get_db()
+    try:
+        delete_user_account(db, user_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("Falha ao excluir a conta do usuário %s", user_id)
+        return jsonify({"error": "Não foi possível excluir a conta."}), 500
+    session.clear()
+    return jsonify({"message": "Conta e dados pessoais excluídos."}), 200
+
+
+@api_bp.route("/user/export-data", methods=["GET"])
+@login_required
+def user_export_data():
+    """Exporta todos os dados do usuário logado (portabilidade LGPD, Art. 18)."""
+    from services.user_service import export_user_data
+
+    payload = export_user_data(get_db(), current_user_id())
+    return jsonify(payload)
 
 
 # ---------------------------------------------------------------------

@@ -97,19 +97,28 @@ def _apply_migrations(conn):
     não recebem colunas/tabelas novas automaticamente. Este helper executa
     as migrações incrementais necessárias para compatibilizar o schema:
       * `users.role`          -> RBAC (admin/user).
+      * `users.plan`          -> modelo Freemium (free/pro).
       * `user_profile_history`-> histórico de revisões do perfil.
       * `app_settings`        -> configurações globais editáveis no /admin.
+      * `ai_usage_logs`       -> log de consumo de IA (rate limiting).
     """
     # Importa no corpo para evitar ciclos de import com models.
-    from models.user import ensure_user_role_column
+    from models.user import ensure_user_plan_column, ensure_user_role_column
     from models.profile import create_user_profile_history_table
     from services.settings_service import ensure_settings_table
     from services.monitoring_service import ensure_parse_errors_table
+    from services.ai_service import (
+        ensure_ai_blocked_logs_table,
+        ensure_ai_usage_logs_table,
+    )
 
     ensure_user_role_column(conn)
+    ensure_user_plan_column(conn)
     create_user_profile_history_table(conn)
     ensure_settings_table(conn)
     ensure_parse_errors_table(conn)
+    ensure_ai_usage_logs_table(conn)
+    ensure_ai_blocked_logs_table(conn)
     conn.commit()
 
 

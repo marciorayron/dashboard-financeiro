@@ -119,8 +119,8 @@ def register():
     if request.method == "POST":
         name = request.form.get("name", "").strip()
         email = request.form.get("email", "").strip().lower()
-        password = request.form.get("password", "")
-        confirm = request.form.get("confirm_password", "")
+        password = (request.form.get("password", "") or "").strip()
+        confirm = (request.form.get("confirm_password", "") or "").strip()
 
         # Validações básicas.
         if not name or not email or not password:
@@ -168,11 +168,11 @@ def login():
 
     if request.method == "POST":
         email = request.form.get("email", "").strip().lower()
-        password = request.form.get("password", "")
+        password = (request.form.get("password", "") or "").strip()
 
         db = get_db()
         user = db.execute(
-            "SELECT id, name, email, password_hash, is_active, role FROM users WHERE email = ?",
+            "SELECT id, name, email, password_hash, is_active, role, plan FROM users WHERE email = ?",
             [email],
         ).fetchone()
 
@@ -186,6 +186,7 @@ def login():
                 session["user_id"] = user["id"]
                 session["user_name"] = user["name"]
                 session["user_role"] = str(user["role"] or "user").lower()
+                session["user_plan"] = str(user["plan"] or "free").lower()
                 # Redireciona para o painel correto pelo papel: admin -> /admin,
                 # usuário comum -> /dashboard (separação RBAC).
                 return _role_home_redirect()

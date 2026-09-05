@@ -4,5 +4,7 @@
 # ============================================================
 -r requirements.txt
 
-# Testes (pytest + unittest integrados).
-pytest
+# Testes (pytest + unittest integrados). Versão fixada conforme o
+# ambiente validado localmente.
+pytest==9.1.1
+

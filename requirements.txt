@@ -1,6 +1,8 @@
 # ============================================================
 # Dependências de RUNTIME (instaladas na imagem Docker de produção).
-# Versões fixadas (pins) conforme a suíte de testes validada localmente.
+# Versões fixadas (pins) conforme o ambiente validado e a suíte de
+# testes (137 passing) — refletem exatamente os pacotes em uso no
+# código-fonte (imports diretos da aplicação/serviços).
 # ============================================================
 
 # Web framework e servidor WSGI de produção.
@@ -11,16 +13,20 @@ gunicorn==22.0.0
 pypdf==6.16.2
 pdfplumber==0.11.10
 
-# Integração com a API DeepSeek (parsing universal).
+# Integração com a API DeepSeek (parsing universal + IA conversacional).
+# A comunicação é via HTTP/JSON (requests) — NÃO é usado um SDK dedicado.
 requests==2.34.2
 
-# Manipulação de dados e exportação (XLSX/CSV).
+# Manipulação de dados, cálculo vetorizado e exportação (XLSX/CSV).
+# numpy é importado diretamente pelos serviços de analytics.
 pandas==3.0.5
+numpy==2.5.2
 openpyxl==3.1.5
 
 # Geração de dossiê em PDF (ReportLab).
 reportlab==5.0.1
 
 # Carregamento de variáveis de ambiente a partir de `.env`.
-python-dotenv==1.0.1
+python-dotenv==1.2.3
+
 

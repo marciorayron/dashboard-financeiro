@@ -40,6 +40,99 @@ DEFAULT_DEPENDENT_DEDUCTION = 189.59
 KEY_INSS = "tax_inss_brackets"
 KEY_IRRF = "tax_irrf_brackets"
 KEY_DEPENDENT = "tax_dependent_deduction"
+KEY_FREEMIUM = "freemium_limits"
+KEY_AI_CONFIG = "ai_config"
+
+# Limites padrão do modelo Freemium (usados quando não há override no banco).
+DEFAULT_FREEMIUM_LIMITS = {
+    "free_paystub_limit": 3,      # máx. de holerites no plano Gratuito
+    "free_ai_queries_per_day": 5,  # consultas de IA por 24h (Free)
+    "pro_ai_queries_per_hour": 15,  # consultas de IA por 1h (Pro)
+}
+
+# Configuração padrão do provedor/modelo de IA (modelo-agnóstico).
+# Preços por 1M de tokens em US$ (input/output) usados no cálculo de FinOps.
+DEFAULT_AI_CONFIG = {
+    "model": "deepseek-chat",
+    "input_rate_per_million": 0.27,
+    "output_rate_per_million": 1.10,
+}
+
+
+def get_ai_config(db) -> dict:
+    """Retorna a configuração ativa do modelo/tarifas de IA (com fallback)."""
+    stored = get_settings(db, KEY_AI_CONFIG, None)
+    if not isinstance(stored, dict):
+        stored = {}
+    config = dict(DEFAULT_AI_CONFIG)
+    if stored.get("model"):
+        config["model"] = str(stored["model"]).strip()
+    for key in ("input_rate_per_million", "output_rate_per_million"):
+        value = stored.get(key)
+        if isinstance(value, (int, float)) and value >= 0:
+            config[key] = float(value)
+    return config
+
+
+def save_ai_config(db, data: dict) -> dict:
+    """
+    Persiste a configuração do provedor/modelo e tarifas de tokens da IA.
+
+    Args:
+        data (dict): {"model": str, "input_rate_per_million": float,
+                      "output_rate_per_million": float}
+
+    Returns:
+        dict: a configuração salva (via `get_ai_config`).
+    """
+    data = data or {}
+    current = get_ai_config(db)
+    if data.get("model"):
+        current["model"] = str(data["model"]).strip()
+    for key in ("input_rate_per_million", "output_rate_per_million"):
+        value = data.get(key)
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed >= 0:
+            current[key] = round(parsed, 8)
+    set_settings(db, KEY_AI_CONFIG, current)
+    return get_ai_config(db)
+
+
+def get_freemium_limits(db) -> dict:
+    """Retorna os limites dinâmicos do modelo Freemium (com fallback padrão)."""
+    stored = get_settings(db, KEY_FREEMIUM, None)
+    if not isinstance(stored, dict):
+        stored = {}
+    limits = dict(DEFAULT_FREEMIUM_LIMITS)
+    for key in DEFAULT_FREEMIUM_LIMITS:
+        value = stored.get(key)
+        if isinstance(value, (int, float)) and value >= 0:
+            limits[key] = int(value)
+    return limits
+
+
+def save_freemium_limits(db, data: dict) -> dict:
+    """
+    Persiste os limites do modelo Freemium editados no painel admin.
+
+    Args:
+        data (dict): {"free_paystub_limit": int, "free_ai_queries_per_day": int,
+                      "pro_ai_queries_per_hour": int}
+
+    Returns:
+        dict: os limites salvos (via `get_freemium_limits`).
+    """
+    data = data or {}
+    current = get_freemium_limits(db)
+    for key in DEFAULT_FREEMIUM_LIMITS:
+        value = data.get(key)
+        if isinstance(value, (int, float)) and value >= 0:
+            current[key] = int(value)
+    set_settings(db, KEY_FREEMIUM, current)
+    return get_freemium_limits(db)
 
 
 def ensure_settings_table(db):

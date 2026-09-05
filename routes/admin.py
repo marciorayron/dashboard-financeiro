@@ -10,19 +10,23 @@ HTTP 403. Reúne:
   * Métricas globais do sistema.
   * Edição de faixas de INSS/IRRF e do catálogo de rubricas (sem deploy).
 """
-from flask import Blueprint, jsonify, render_template, request, session
+from flask import Blueprint, current_app, jsonify, render_template, request, session
 
 from database.connection import get_db
 from models.user import (
+    create_user,
+    delete_user,
     get_user,
     list_users,
     reset_user_password,
     set_user_active,
+    set_user_password,
+    set_user_plan,
     set_user_role,
     to_dict as user_to_dict,
 )
 from routes.auth import admin_required
-from services import monitoring_service, settings_service
+from services import admin_service, monitoring_service, settings_service
 from services.analytics_service import theoretical_recurrent_net_for_month
 
 admin_bp = Blueprint("admin", __name__)
@@ -48,23 +52,138 @@ def index():
 # Gestão de usuários
 # ---------------------------------------------------------------------
 def _user_row_with_stats(db, user):
-    """Serializa um usuário com contagens globais associadas."""
-    paystubs = db.execute(
-        "SELECT COUNT(*) AS c FROM holerites WHERE user_id = ?", [user.id]
-    ).fetchone()["c"]
-    return {
-        **user_to_dict(user),
-        "paystubs": paystubs,
-    }
+    """Serializa um usuário com contagens associadas (via admin_service)."""
+    return admin_service.user_row_with_stats(db, user)
 
 
 @admin_bp.route("/admin/api/users", methods=["GET"])
 @admin_required
 def admin_users_list():
-    """Lista todos os usuários com contagens associadas."""
+    """Lista todos os usuários com contagens associadas (CRM)."""
     db = get_db()
-    users = [_user_row_with_stats(db, u) for u in list_users(db)]
-    return jsonify(users)
+    return jsonify(admin_service.list_users_with_stats(db))
+
+
+@admin_bp.route("/admin/api/users/create", methods=["POST"])
+@admin_required
+def admin_user_create():
+    """
+    Cria um novo usuário operacionalmente (a partir do painel admin).
+
+    Corpo JSON: {"name", "email", "password", "role": user|admin,
+                 "plan": free|pro}.
+    """
+    body = request.get_json(silent=True) or {}
+    # Limite de usuários suportados pela instância (multi-tenant).
+    max_users = int(current_app.config.get("MAX_USERS", 10) or 10)
+    db = get_db()
+    current_count = db.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
+    if current_count >= max_users:
+        return jsonify(
+            {"error": f"Limite de {max_users} usuários atingido."}
+        ), 400
+    try:
+        user = create_user(
+            db,
+            name=body.get("name"),
+            email=body.get("email"),
+            password=body.get("password"),
+            role=body.get("role"),
+            plan=body.get("plan"),
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify(_user_row_with_stats(db, user)), 201
+
+
+@admin_bp.route("/admin/api/users/<int:user_id>/toggle-status", methods=["POST"])
+@admin_required
+def admin_user_toggle_status(user_id: int):
+    """
+    Suspende ou reinstate uma conta.
+
+    Corpo JSON (opcional): {"active": true|false}. Sem `active`, alterna o
+    estado atual. Não permite alterar a própria conta.
+    """
+    body = request.get_json(silent=True) or {}
+    db = get_db()
+    target = get_user(db, user_id)
+    if target is None:
+        return jsonify({"error": "Usuário não encontrado."}), 404
+    if user_id == session.get("user_id"):
+        return jsonify({"error": "Não é possível alterar a própria conta."}), 400
+
+    requested = body.get("active")
+    if isinstance(requested, bool):
+        active = requested
+    else:
+        active = not target.is_active
+    updated = set_user_active(db, user_id, active)
+    return jsonify(_user_row_with_stats(db, updated))
+
+
+@admin_bp.route("/admin/api/users/<int:user_id>/reset-holerites", methods=["POST"])
+@admin_required
+def admin_user_reset_holerites(user_id: int):
+    """Apaga todos os holerites/rubricas do usuário (suporte)."""
+    db = get_db()
+    if get_user(db, user_id) is None:
+        return jsonify({"error": "Usuário não encontrado."}), 404
+    result = admin_service.reset_holerites(db, user_id)
+    return jsonify({**result, "message": "Holerites do usuário removidos."})
+
+
+@admin_bp.route("/admin/api/users/<int:user_id>/delete", methods=["POST"])
+@admin_required
+def admin_user_delete(user_id: int):
+    """Exclui definitivamente um usuário e seus dados (cascade)."""
+    if user_id == session.get("user_id"):
+        return jsonify({"error": "Não é possível excluir a própria conta."}), 400
+    db = get_db()
+    target = get_user(db, user_id)
+    if target is None:
+        return jsonify({"error": "Usuário não encontrado."}), 404
+    # Garante a exclusão em cascata das tabelas associadas (suporte/gestão).
+    admin_service.reset_holerites(db, user_id)
+    admin_service.reset_user_usage(db, user_id)
+    deleted = delete_user(db, user_id)
+    if not deleted:
+        return jsonify({"error": "Usuário não encontrado."}), 404
+    return jsonify({"message": "Usuário excluído.", "user_id": user_id})
+
+
+@admin_bp.route("/admin/api/users/<int:user_id>/plan", methods=["POST"])
+@admin_required
+def admin_user_plan(user_id: int):
+    """
+    Altera o plano de assinatura de um usuário ('free' | 'pro').
+
+    Corpo JSON: {"plan": "pro"}.
+    """
+    body = request.get_json(silent=True) or {}
+    plan = str(body.get("plan") or "").lower()
+    if plan not in ("free", "pro"):
+        return jsonify({"error": "Plano inválido. Use 'free' ou 'pro'."}), 400
+    db = get_db()
+    updated = set_user_plan(db, user_id, plan)
+    if updated is None:
+        return jsonify({"error": "Usuário não encontrado."}), 404
+    return jsonify(_user_row_with_stats(db, updated))
+
+
+@admin_bp.route("/admin/api/users/<int:user_id>/reset-usage", methods=["POST"])
+@admin_required
+def admin_user_reset_usage(user_id: int):
+    """
+    Zera o consumo de IA de um usuário (limpa `ai_usage_logs` e
+    `ai_blocked_logs`) — usado em chamados de suporte.
+    """
+    db = get_db()
+    target = get_user(db, user_id)
+    if target is None:
+        return jsonify({"error": "Usuário não encontrado."}), 404
+    result = admin_service.reset_user_usage(db, user_id)
+    return jsonify({**result, "message": "Consumo de IA zerado."})
 
 
 @admin_bp.route("/admin/api/users/<int:user_id>/toggle-active", methods=["POST"])
@@ -102,11 +221,27 @@ def admin_user_role(user_id: int):
 @admin_bp.route("/admin/api/users/<int:user_id>/reset-password", methods=["POST"])
 @admin_required
 def admin_user_reset_password(user_id: int):
-    """Gera uma senha temporária para o usuário e a retorna UMA vez."""
+    """
+    Redefine a senha do usuário.
+
+    Se o corpo trouxer `{"password": "..."}`, define essa senha explícita;
+    caso contrário, gera uma senha temporária e a retorna UMA vez (exibida ao
+    admin para repasse ao usuário).
+    """
+    body = request.get_json(silent=True) or {}
     db = get_db()
     target = get_user(db, user_id)
     if target is None:
         return jsonify({"error": "Usuário não encontrado."}), 404
+
+    explicit = body.get("password")
+    if explicit:
+        try:
+            set_user_password(db, user_id, explicit)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        return jsonify({"message": "Senha redefinida.", "user_id": user_id})
+
     temporary = reset_user_password(db, user_id)
     return jsonify(
         {
@@ -128,6 +263,82 @@ def admin_metrics():
     """
     db = get_db()
     return jsonify(monitoring_service.get_system_health(db))
+
+
+@admin_bp.route("/admin/api/stats", methods=["GET"])
+@admin_required
+def admin_stats():
+    """
+    KPIs agregados para o backoffice: usuários e divisão de planos (MRR/Pro),
+    holerites, consumo de IA (tokens estimados e custo), armazenamento e
+    erros de parsing.
+    """
+    db = get_db()
+    return jsonify(admin_service.get_stats(db))
+
+
+@admin_bp.route("/admin/api/ai-usage", methods=["GET"])
+@admin_required
+def admin_ai_usage():
+    """Dados de consumo de IA para a aba FinOps (breakdown + leaderboard)."""
+    db = get_db()
+    return jsonify(admin_service.get_ai_usage(db))
+
+
+@admin_bp.route("/admin/api/freemium-limits", methods=["GET"])
+@admin_required
+def admin_get_freemium_limits():
+    """Retorna os limites dinâmicos do modelo Freemium."""
+    return jsonify(settings_service.get_freemium_limits(get_db()))
+
+
+@admin_bp.route("/admin/api/freemium-limits", methods=["PUT"])
+@admin_required
+def admin_put_freemium_limits():
+    """Persiste os limites do modelo Freemium editados no painel."""
+    body = request.get_json(silent=True) or {}
+    db = get_db()
+    saved = settings_service.save_freemium_limits(db, body)
+    return jsonify(saved)
+
+
+@admin_bp.route("/admin/api/ai-config", methods=["GET"])
+@admin_required
+def admin_get_ai_config():
+    """Retorna a configuração ativa do modelo/tarifas de IA."""
+    return jsonify(settings_service.get_ai_config(get_db()))
+
+
+@admin_bp.route("/admin/api/ai-config", methods=["PUT"])
+@admin_required
+def admin_put_ai_config():
+    """
+    Persiste a configuração ativa do modelo de IA e as tarifas de tokens.
+
+    Corpo JSON: {"model": str, "input_rate_per_million": float,
+                 "output_rate_per_million": float}
+    """
+    body = request.get_json(silent=True) or {}
+    db = get_db()
+    saved = settings_service.save_ai_config(db, body)
+    return jsonify(saved)
+
+
+@admin_bp.route("/admin/api/storage", methods=["GET"])
+@admin_required
+def admin_storage():
+    """Detalhamento do consumo de armazenamento em disco."""
+    db = get_db()
+    return jsonify(admin_service.get_storage_breakdown(db))
+
+
+@admin_bp.route("/admin/api/storage/cleanup", methods=["POST"])
+@admin_required
+def admin_storage_cleanup():
+    """Remove arquivos órfãos/temporários não referenciados por holerites."""
+    db = get_db()
+    result = admin_service.clean_orphaned_files(db)
+    return jsonify({**result, "message": "Limpeza concluída."})
 
 
 # ---------------------------------------------------------------------

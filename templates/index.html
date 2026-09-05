@@ -20,6 +20,11 @@
         <span class="navbar-text small d-none d-md-inline">
           <i class="bi bi-person-circle me-1"></i>{{ user_name }}
         </span>
+        {% if user_plan == 'pro' %}
+        <span class="badge text-bg-warning plan-badge" title="Plano Pró"><i class="bi bi-stars me-1"></i>Plano Pró ✨</span>
+        {% else %}
+        <span class="badge text-bg-secondary plan-badge" title="Plano Gratuito">Plano Free</span>
+        {% endif %}
         <button type="button" class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#profileModal">
           <i class="bi bi-sliders me-1"></i>Perfil
         </button>
@@ -76,6 +81,29 @@
           <div id="uploadProgressBar" class="progress-bar progress-bar-striped progress-bar-animated" style="width: 0%"></div>
         </div>
         <div id="uploadStatus" class="small text-secondary mt-1 d-none"></div>
+        <div class="d-flex justify-content-between align-items-center small text-secondary mt-1">
+          <span><i class="bi bi-files me-1"></i>Holerites cadastrados: <strong id="paystubCount">0</strong>/<span id="paystubLimit">3</span></span>
+          <span id="uploadPlanNote" class="d-none"></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Pergunte à IA (busca global contextualizada) -->
+    <div class="card panel mb-3">
+      <div class="card-body">
+        <h5 class="panel-title mb-2"><i class="bi bi-stars me-2"></i>Pergunte à IA</h5>
+        <div class="input-group">
+          <input type="text" id="aiQuestion" class="form-control" maxlength="200"
+                 placeholder="Ex.: Por que meu IRRF subiu em 2026-07?" aria-label="Pergunta para a IA" />
+          <button type="button" id="aiAskBtn" class="btn btn-primary"><i class="bi bi-send me-1"></i> Perguntar</button>
+        </div>
+        <div class="d-flex flex-wrap gap-2 mt-2 small" id="aiPills">
+          <button type="button" class="btn btn-sm btn-outline-info ai-pill" data-q="Por que meu IRRF subiu em 2026-07?">Por que meu IRRF subiu em 2026-07?</button>
+          <button type="button" class="btn btn-sm btn-outline-info ai-pill" data-q="Qual o total pago em Fretado?">Qual o total pago em Fretado?</button>
+          <button type="button" class="btn btn-sm btn-outline-info ai-pill" data-q="Qual o meu salário líquido médio?">Qual o meu salário líquido médio?</button>
+          <button type="button" class="btn btn-sm btn-outline-info ai-pill" data-q="Quanto paguei de INSS no ano?">Quanto paguei de INSS no ano?</button>
+        </div>
+        <div id="aiAnswer" class="ai-answer d-none mt-2"></div>
       </div>
     </div>
 
@@ -98,7 +126,11 @@
           <div class="col-6 col-xl-3">
             <div class="card kpi-card h-100">
               <div class="card-body">
-                <div class="kpi-title">Líquido Recorrente Efetivo</div>
+                <div class="kpi-title d-flex align-items-center gap-2 flex-wrap">
+                  Líquido Recorrente Efetivo
+                  <button type="button" class="btn btn-link btn-sm p-0 lh-1 explain-btn" data-card="recurrent_net"
+                          title="Explicar com IA" aria-label="Explicar com IA"><span>✨</span></button>
+                </div>
                 <div class="kpi-value success" id="kpiRecurrentNet">R$ 0,00</div>
                 <div class="kpi-subtitle text-secondary small" id="kpiRecurrentNetSub">média de meses completos</div>
               </div>
@@ -107,8 +139,16 @@
           <div class="col-6 col-xl-3">
             <div class="card kpi-card h-100">
               <div class="card-body">
-                <div class="kpi-title">Salário-Hora Efetivo</div>
+                <div class="kpi-title d-flex align-items-center gap-2 flex-wrap">
+                  Salário-Hora Efetivo
+                  <button type="button" class="btn btn-link btn-sm p-0 lh-1 explain-btn" data-card="salario_hora"
+                          title="Explicar com IA" aria-label="Explicar com IA"><span>✨</span></button>
+                </div>
                 <div class="kpi-value" id="kpiEffHourly">R$ 0,00</div>
+                <div id="effHourlyToggle" class="btn-group btn-group-sm mt-1 mb-1" role="group" aria-label="Visão do Salário-Hora Efetivo">
+                  <button type="button" class="btn btn-outline-secondary active" data-view="monthly">Mensal</button>
+                  <button type="button" class="btn btn-outline-secondary" data-view="period">Período</button>
+                </div>
                 <div class="kpi-subtitle text-secondary small" id="kpiEffHourlySub">(líquido + H.E.) / horas</div>
               </div>
             </div>
@@ -116,7 +156,11 @@
           <div class="col-6 col-xl-3">
             <div class="card kpi-card h-100">
               <div class="card-body">
-                <div class="kpi-title">Vulnerabilidade de H.E.</div>
+                <div class="kpi-title d-flex align-items-center gap-2 flex-wrap">
+                  Vulnerabilidade de H.E.
+                  <button type="button" class="btn btn-link btn-sm p-0 lh-1 explain-btn" data-card="overtime_vulnerability"
+                          title="Explicar com IA" aria-label="Explicar com IA"><span>✨</span></button>
+                </div>
                 <div class="kpi-value warning" id="kpiOvertimeVuln">0%</div>
                 <div class="kpi-subtitle text-secondary small" id="kpiOvertimeVulnSub">R$ 0,00 em horas extras</div>
               </div>
@@ -125,7 +169,11 @@
           <div class="col-6 col-xl-3">
             <div class="card kpi-card h-100">
               <div class="card-body">
-                <div class="kpi-title">Alíquota Efetiva de Retenção</div>
+                <div class="kpi-title d-flex align-items-center gap-2 flex-wrap">
+                  Alíquota Efetiva de Retenção
+                  <button type="button" class="btn btn-link btn-sm p-0 lh-1 explain-btn" data-card="effective_tax_rate"
+                          title="Explicar com IA" aria-label="Explicar com IA"><span>✨</span></button>
+                </div>
                 <div class="kpi-value danger" id="kpiRetentionRate">0%</div>
                 <div class="kpi-subtitle text-secondary small" id="kpiRetentionSub">INSS 0% + IRRF 0%</div>
               </div>
@@ -134,24 +182,174 @@
           <div class="col-6 col-xl-3">
             <div class="card kpi-card h-100">
               <div class="card-body">
-                <div class="kpi-title">Projeção de Entrada Anual</div>
+                <div class="kpi-title d-flex align-items-center gap-2 flex-wrap">
+                  Projeção de Entrada Anual
+                  <span class="badge text-bg-secondary small">Acumulado Global</span>
+                  <button type="button" class="btn btn-link btn-sm p-0 lh-1 explain-btn" data-card="projecao_anual"
+                          title="Explicar com IA" aria-label="Explicar com IA"><span>✨</span></button>
+                </div>
                 <div class="kpi-value" id="kpiAnnualInflow">R$ 0,00</div>
-                <div class="kpi-subtitle text-secondary small" id="kpiAnnualInflowSub">baseline 12m</div>
+                <div class="kpi-subtitle text-secondary small" id="kpiAnnualInflowSub">baseline 12m · Acumulado Global</div>
               </div>
             </div>
           </div>
           <div class="col-6 col-xl-3">
             <div class="card kpi-card h-100">
               <div class="card-body">
-                <div class="kpi-title"><i class="bi bi-exclamation-triangle me-1"></i>Inconsistências (Total R$)</div>
-                <div class="kpi-value danger" id="kpiAnomalyTotal">R$ 0,00</div>
-                <div class="kpi-subtitle text-secondary small" id="kpiAnomalyTotalSub">em discrepâncias identificadas</div>
+                <div class="d-flex justify-content-between align-items-start gap-2">
+                  <div>
+                    <div class="kpi-title"><i class="bi bi-exclamation-triangle me-1"></i>Inconsistências (Total R$)</div>
+                    <div class="kpi-value danger" id="kpiAnomalyTotal">R$ 0,00</div>
+                    <div class="kpi-subtitle text-secondary small" id="kpiAnomalyTotalSub">em discrepâncias identificadas</div>
+                  </div>
+                  <button type="button" class="btn btn-link btn-sm p-0 lh-1 explain-btn" data-card="inconsistencias"
+                          title="Explicar com IA" aria-label="Explicar com IA"><span>✨</span></button>
+                  <button type="button" class="btn btn-sm btn-outline-info lh-1" data-bs-toggle="modal"
+                          data-bs-target="#inconsistencyModal" title="Detalhar inconsistências">
+                    <i class="bi bi-list-ul"></i>
+                  </button>
+                </div>
+                <a href="/api/reports/dispute-pdf" target="_blank" rel="noopener"
+                   class="btn btn-sm btn-outline-warning w-100 mt-2">
+                  <i class="bi bi-file-earmark-pdf me-1"></i>Export HR Dispute Report (PDF)
+                </a>
               </div>
             </div>
           </div>
         </div>
       </div>
     </div>
+    <!-- Jornada de Trabalho & Horas Extras -->
+    <div class="card panel mb-3">
+      <div class="card-body">
+        <h5 class="panel-title mb-3"><i class="bi bi-person-workspace me-2"></i>Jornada de Trabalho &amp; Horas Extras</h5>
+        <div class="row g-3">
+          <div class="col-md-4">
+            <div class="border rounded p-3 text-center h-100">
+              <div class="small text-secondary">Horas Contratuais no Período</div>
+              <div class="fs-3 fw-bold" id="whContractualHours">0 h</div>
+              <div class="small text-secondary" id="whContractualHoursSub">—</div>
+            </div>
+          </div>
+          <div class="col-md-4">
+            <div class="border rounded p-3 text-center h-100">
+              <div class="small text-secondary">Horas Extras Trabalhadas</div>
+              <div class="fs-3 fw-bold text-warning" id="whExtraHours">0 h</div>
+              <div class="small text-secondary" id="whExtraHoursSub">—</div>
+            </div>
+          </div>
+          <div class="col-md-4">
+            <div class="border rounded p-3 h-100">
+              <div class="small text-secondary mb-2">Divisão do Overtime</div>
+              <div class="d-flex justify-content-between small mb-1">
+                <span id="whTier1Label">50/70%</span>
+                <span id="whTier1Pct">0%</span>
+              </div>
+              <div class="progress mb-2" style="height: 14px;">
+                <div class="progress-bar bg-primary" id="whTier1Bar" style="width: 0%"></div>
+                <div class="progress-bar bg-success" id="whTier2Bar" style="width: 0%"></div>
+              </div>
+              <div class="d-flex justify-content-between small">
+                <span id="whTier2Label" class="text-success">100%</span>
+                <span id="whTier2Pct" class="text-success">0%</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Projeção Tributária Anual (INSS & IRRF) -->
+    <div class="card panel mb-3">
+      <div class="card-body">
+        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+          <h5 class="panel-title mb-0"><i class="bi bi-calculator me-2"></i>Projeção Tributária Anual (INSS &amp; IRRF)</h5>
+          <select id="taxMethodSelect" class="form-select form-select-sm w-auto" aria-label="Método de projeção tributária">
+            <option value="average">Média Histórica</option>
+            <option value="trend">Tendência (Últimos 3M)</option>
+            <option value="last_month">Último Mês (Run-Rate)</option>
+          </select>
+        </div>
+        <div class="row g-3">
+          <div class="col-6 col-md-3">
+            <div class="border rounded p-3 text-center h-100">
+              <div class="small text-secondary">INSS Acumulado YTD</div>
+              <div class="fs-5 fw-bold" id="taxInssYtd">R$ 0,00</div>
+            </div>
+          </div>
+          <div class="col-6 col-md-3">
+            <div class="border rounded p-3 text-center h-100">
+              <div class="small text-secondary">IRRF Acumulado YTD</div>
+              <div class="fs-5 fw-bold" id="taxIrrfYtd">R$ 0,00</div>
+            </div>
+          </div>
+          <div class="col-6 col-md-3">
+            <div class="border rounded p-3 text-center h-100">
+              <div class="small text-secondary">Projeção INSS (até dez.)</div>
+              <div class="fs-5 fw-bold text-info" id="taxInssProj">R$ 0,00</div>
+              <div class="small text-warning" id="taxInssNote"></div>
+            </div>
+          </div>
+          <div class="col-6 col-md-3">
+            <div class="border rounded p-3 text-center h-100">
+              <div class="small text-secondary">Projeção IRRF (até dez.)</div>
+              <div class="fs-5 fw-bold text-info" id="taxIrrfProj">R$ 0,00</div>
+            </div>
+          </div>
+        </div>
+        <div class="small text-secondary mt-2" id="taxSub">Retenções reais acumuladas + projeção até o fim do ano.</div>
+      </div>
+    </div>
+
+    <!-- Planejador de Poupança e Reserva -->
+    <div class="card panel mb-3">
+      <div class="card-body">
+        <h5 class="panel-title mb-3"><i class="bi bi-piggy-bank me-2"></i>Planejador de Poupança e Reserva</h5>
+        <div class="row g-4">
+          <div class="col-lg-4">
+            <label class="form-label small" for="savingsSlider">Taxa de Poupança sobre o Líquido</label>
+            <div class="d-flex justify-content-between small text-secondary mb-1">
+              <span>5%</span><span class="fs-6 fw-bold text-primary" id="savingsRateLabel">20%</span><span>50%</span>
+            </div>
+            <input type="range" class="form-range" id="savingsSlider" min="5" max="50" step="1" value="20" />
+            <label class="form-label small mt-3" for="savingsStart">Período Alvo</label>
+            <div class="d-flex gap-2">
+              <input type="month" id="savingsStart" class="form-control form-control-sm" />
+              <span class="align-self-center text-secondary">até</span>
+              <input type="month" id="savingsEnd" class="form-control form-control-sm" />
+            </div>
+            <div class="form-check form-switch mt-3">
+              <input class="form-check-input" type="checkbox" id="savingsBonus" checked />
+              <label class="form-check-label small" for="savingsBonus">
+                Incluir 13º salário e Férias (1/3) na projeção
+              </label>
+            </div>
+          </div>
+          <div class="col-lg-4">
+            <div class="small text-secondary mb-2">Composição</div>
+            <ul class="list-unstyled small mb-0">
+              <li class="d-flex justify-content-between py-1 border-bottom border-secondary-subtle">
+                <span>Base mensal (líquido × taxa)</span><span id="savingsMonthly">R$ 0,00</span>
+              </li>
+              <li class="d-flex justify-content-between py-1 border-bottom border-secondary-subtle">
+                <span>Meses no período</span><span id="savingsMonths">0</span>
+              </li>
+              <li class="d-flex justify-content-between py-1">
+                <span>13º + Férias (1/3)</span><span id="savingsBonusVal">R$ 0,00</span>
+              </li>
+            </ul>
+          </div>
+          <div class="col-lg-4">
+            <div class="border rounded p-4 text-center h-100 d-flex flex-column justify-content-center">
+              <div class="small text-secondary">Total Acumulado</div>
+              <div class="display-6 fw-bold text-success" id="savingsTotal">R$ 0,00</div>
+              <div class="small text-secondary" id="savingsTotalSub">—</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Ação: grid de 2 colunas (Simulador 40% + Inconsistências 60%) -->
     <div class="row g-3 mb-3">
       <!-- Coluna esquerda: Simulador de Horas Extras (permanente) -->
@@ -316,6 +514,93 @@
         </div>
       </div>
     </div>
+  </div>
+
+  <!-- Modal: Detalhe das Inconsistências -->
+  <div class="modal fade" id="inconsistencyModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <div class="modal-content panel">
+        <div class="modal-header border-secondary-subtle">
+          <h5 class="modal-title"><i class="bi bi-shield-exclamation me-2"></i>Inconsistências Detalhadas</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fechar"></button>
+        </div>
+        <div class="modal-body">
+          <div class="d-flex justify-content-between align-items-center mb-3">
+            <div>
+              <div class="small text-secondary">Impacto monetário total</div>
+              <div class="fs-4 fw-bold text-danger" id="incModalTotal">R$ 0,00</div>
+            </div>
+            <a href="/api/reports/dispute-pdf" target="_blank" rel="noopener"
+               class="btn btn-sm btn-outline-warning">
+              <i class="bi bi-file-earmark-pdf me-1"></i>Export HR Dispute Report (PDF)
+            </a>
+          </div>
+          <div id="incModalEmpty" class="text-center text-secondary small py-4 d-none">
+            <i class="bi bi-check-circle text-success me-1"></i>Nenhuma inconsistência detectada.
+          </div>
+          <div id="incModalList" class="list-group list-group-flush anomaly-list"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Upgrade para o Plano Pró -->
+  <div class="modal fade" id="upgradeModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content panel text-center">
+        <div class="modal-body p-4">
+          <i class="bi bi-stars display-4 text-warning"></i>
+          <h4 class="mt-2">Desbloqueie o Plano Pró ✨</h4>
+          <p class="text-secondary" id="upgradeModalMsg">
+            Você atingiu o limite do plano Gratuito. Faça upgrade para continuar
+            com acesso total.
+          </p>
+          <ul class="list-unstyled small text-start mx-auto upgrade-benefits">
+            <li><i class="bi bi-check-circle-fill text-success me-2"></i>Holerites ilimitados</li>
+            <li><i class="bi bi-check-circle-fill text-success me-2"></i>15 consultas de IA por hora</li>
+            <li><i class="bi bi-check-circle-fill text-success me-2"></i>Explicações de inconsistências com IA</li>
+          </ul>
+          <button type="button" class="btn btn-warning w-100">
+            <i class="bi bi-stars me-1"></i>Fazer upgrade agora
+          </button>
+          <div class="mt-2">
+            <button type="button" class="btn btn-sm btn-link text-secondary" data-bs-dismiss="modal">Agora não</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Explicação do Card com IA (Explain ✨) -->
+  <div class="modal fade" id="explainCardModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="explainCardTitle"><i class="bi bi-stars me-2 text-primary"></i>Explicação da IA</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fechar"></button>
+        </div>
+        <div class="modal-body">
+          <div id="explainCardSkeleton" class="text-secondary">
+            <div class="spinner-border spinner-border-sm me-2" role="status"></div>Consultando a IA...
+            <div class="placeholder-glow mt-3">
+              <span class="placeholder col-12"></span>
+              <span class="placeholder col-11"></span>
+              <span class="placeholder col-10"></span>
+            </div>
+          </div>
+          <div id="explainCardBody" class="small d-none"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Drawer: explicação de inconsistência com IA -->
+  <div id="aiDrawer" class="ai-drawer d-none" aria-live="polite">
+    <div class="ai-drawer-head">
+      <span><i class="bi bi-stars me-1"></i>Explicação da IA</span>
+      <button type="button" class="btn-close btn-close-white" id="aiDrawerClose" aria-label="Fechar"></button>
+    </div>
+    <div id="aiDrawerBody" class="ai-drawer-body small"></div>
   </div>
 
   <!-- Modal de perfil -->

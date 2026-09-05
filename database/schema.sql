@@ -20,10 +20,45 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT,                 -- opcional; autenticação futura
     role          TEXT    NOT NULL DEFAULT 'user'
                          CHECK (role IN ('admin', 'user')),
+    plan          TEXT    NOT NULL DEFAULT 'free'
+                         CHECK (plan IN ('free', 'pro')),
     is_active     INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
     created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
     updated_at    TEXT    NOT NULL DEFAULT (datetime('now'))
 );
+
+-- ---------------------------------------------------------------------
+-- AI_USAGE_LOGS
+-- Log de auditoria de chamadas à IA (DeepSeek) por usuário, usado para
+-- aplicar o controle de consumo (rate limiting) do modelo Freemium:
+--   * Plano Gratuito  -> máx. 5 consultas por janela de 24h.
+--   * Plano Pró       -> máx. 15 consultas por janela de 1h.
+-- Cada linha representa UMA chamada válida a `/api/analytics/ask-ai` ou
+-- `/api/analytics/explain-anomaly`.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS ai_usage_logs (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ai_usage_user_created
+    ON ai_usage_logs (user_id, created_at);
+
+-- ---------------------------------------------------------------------
+-- AI_BLOCKED_LOGS
+-- Auditoria de tentativas de prompt injection / entradas inválidas
+-- rejeitadas pelo `ai_service`. Alimenta a governança de IA (FinOps)
+-- no painel administrativo.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS ai_blocked_logs (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    reason     TEXT    NOT NULL,
+    detail     TEXT,
+    created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ai_blocked_user_created
+    ON ai_blocked_logs (user_id, created_at);
 
 -- ---------------------------------------------------------------------
 -- HOLERITES

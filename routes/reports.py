@@ -182,6 +182,43 @@ def dossier_pdf():
     )
 
 
+@reports_bp.route("/reports/dispute-pdf", methods=["GET"])
+@login_required
+def dispute_pdf():
+    """
+    Relatório de Disputa de RH (HR Dispute Report) — inconsistências itemizadas.
+
+    Lista cada inconsistência detectada com severidade, mês e impacto R$,
+    permitindo encaminhamento formal ao RH/DP. `reportlab` é opcional; sem ele
+    responde 503 com orientação de instalação.
+    """
+    user_id = current_user_id()
+    db = get_db()
+    profile = load_profile(db, user_id)
+
+    u = db.execute("SELECT name FROM users WHERE id=?", [user_id]).fetchone()
+    worker_name = u["name"] if u else ""
+    comp = db.execute(
+        "SELECT company_name FROM holerites WHERE user_id=? "
+        "AND company_name IS NOT NULL ORDER BY mes_referencia DESC LIMIT 1",
+        [user_id],
+    ).fetchone()
+    company = comp["company_name"] if comp else ""
+
+    breakdown = analytics_service.get_inconsistency_breakdown(user_id)
+
+    if not HAS_REPORTLAB:
+        return jsonify(
+            {
+                "error": (
+                    "Relatório PDF indisponível: instale a dependência opcional "
+                    "'reportlab' (pip install -r requirements.txt) e reinicie a aplicação."
+                )
+            }
+        ), 503
+
+    return _build_dispute_pdf(worker_name, company, profile, breakdown)
+
 
 @reports_bp.route("/verify/<doc_hash>", methods=["GET"])
 def verify_doc(doc_hash):
@@ -403,5 +440,141 @@ def _build_pdf(worker_name, company, profile, m3, m6, m12, theoretical,
         pdf,
         mimetype="application/pdf",
         headers={"Content-Disposition": "attachment; filename=dossie_capacidade_financeira.pdf"},
+    )
+
+
+
+def _build_dispute_pdf(worker_name, company, profile, breakdown):
+    """Monta o Relatório de Disputa de RH (inconsistências itemizadas)."""
+    NAVY = colors.HexColor("#0f172a")
+    SLATE = colors.HexColor("#1e293b")
+    RED = colors.HexColor("#dc2626")
+    AMBER = colors.HexColor("#d97706")
+    BORDER = colors.HexColor("#cbd5e1")
+    ROW_A = colors.HexColor("#f8fafc")
+
+    buf = BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4,
+        leftMargin=14 * mm, rightMargin=14 * mm,
+        topMargin=11 * mm, bottomMargin=13 * mm,
+    )
+    styles = getSampleStyleSheet()
+
+    def st(name, **kw):
+        parent = kw.pop("parent", styles["Normal"])
+        return ParagraphStyle(name, parent=parent, **kw)
+
+    banner_title = st("dt", fontName="Helvetica-Bold", fontSize=15, leading=18, textColor=colors.white)
+    banner_sub = st("ds", fontName="Helvetica", fontSize=7.5, leading=10, textColor=colors.HexColor("#cbd5e1"))
+    section = st("sec", fontName="Helvetica-Bold", fontSize=9.5, leading=12, textColor=SLATE, spaceBefore=6, spaceAfter=2)
+    field = st("f", fontName="Helvetica", fontSize=8, leading=10, textColor=colors.HexColor("#475569"))
+    value = st("v", fontName="Helvetica-Bold", fontSize=8.5, leading=11, textColor=SLATE)
+    cell = st("c", fontName="Helvetica", fontSize=7.5, leading=9)
+    cell_b = st("cb", fontName="Helvetica-Bold", fontSize=7.5, leading=9)
+    tiny = st("t", fontName="Helvetica", fontSize=6.5, leading=8, textColor=colors.HexColor("#64748b"))
+
+    story = []
+
+    # ---- 1) Cabeçalho ----
+    header = Table(
+        [[
+            Paragraph("RELATÓRIO DE DISPUTA DE RH — INCONSISTÊNCIAS", banner_title),
+            Paragraph(
+                f"Emissão: {date.today().strftime('%d/%m/%Y %H:%M')}<br/>"
+                f"Documento: DISP-{date.today():%Y%m%d}",
+                banner_sub,
+            ),
+        ]],
+        colWidths=[118 * mm, 63 * mm],
+    )
+    header.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), NAVY),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ]))
+    story.append(header)
+    story.append(Spacer(1, 6))
+
+    # ---- 2) Identificação ----
+    story.append(Paragraph("IDENTIFICAÇÃO DO TRABALHADOR", section))
+    def kv(label, val):
+        return [Paragraph(label, field), Paragraph(val, value)]
+    info = [
+        kv("Nome", worker_name or "—"),
+        kv("Empresa", company or "—"),
+        kv("Cargo", (profile.job_title or "—") if profile else "—"),
+        kv("Admissão", (profile.admission_date or "—") if profile else "—"),
+    ]
+    info_tbl = Table([info[0] + info[1], info[2] + info[3]], colWidths=[35 * mm, 52 * mm, 35 * mm, 52 * mm])
+    info_tbl.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.4, BORDER),
+        ("BACKGROUND", (0, 0), (-1, -1), colors.white),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    story.append(info_tbl)
+    story.append(Spacer(1, 6))
+
+    # ---- 3) Resumo ----
+    total = float(breakdown.get("total") or 0.0)
+    count = int(breakdown.get("count") or 0)
+    story.append(Paragraph(
+        f"Total de inconsistências: {count}  ·  Impacto monetário identificado: {_brl(total)}",
+        section,
+    ))
+    story.append(Spacer(1, 3))
+
+    # ---- 4) Tabela de inconsistências ----
+    story.append(Paragraph("ITEMIZAÇÃO DAS INCONSISTÊNCIAS", section))
+    rows = [[
+        Paragraph("Severidade", cell_b),
+        Paragraph("Categoria", cell_b),
+        Paragraph("Competência", cell_b),
+        Paragraph("Descrição", cell_b),
+        Paragraph("Impacto R$", cell_b),
+    ]]
+    items = breakdown.get("items") or []
+    for it in items:
+        rows.append([
+            Paragraph(str(it.get("severity") or "INFO"), cell),
+            Paragraph(str(it.get("category") or "—"), cell),
+            Paragraph(str(it.get("month") or "—"), cell),
+            Paragraph(f"{it.get('title') or ''} — {it.get('description') or ''}", cell),
+            Paragraph(_brl(it.get("amount") or 0.0), cell_b),
+        ])
+    if not items:
+        rows.append([Paragraph("Nenhuma inconsistência detectada.", cell)] + [Paragraph("—", cell)] * 4)
+    tbl = Table(rows, colWidths=[20 * mm, 22 * mm, 22 * mm, 88 * mm, 29 * mm], repeatRows=1)
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), SLATE),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.4, BORDER),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [ROW_A, colors.white]),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+    ]))
+    story.append(tbl)
+    story.append(Spacer(1, 8))
+
+    # ---- 5) Rodapé legal ----
+    story.append(Paragraph(
+        "DISCLAIMER: Documento informativo gerado automaticamente a partir de contracheques. "
+        "Valores em R$. Não constitui parecer jurídico ou confissão de dívida; deve ser "
+        "encaminhado ao RH/DP para análise e regularização.",
+        tiny,
+    ))
+
+    doc.build(story, onFirstPage=_pdf_footer, onLaterPages=_pdf_footer)
+    pdf = buf.getvalue()
+    return Response(
+        pdf,
+        mimetype="application/pdf",
+        headers={"Content-Disposition": "attachment; filename=relatorio_disputa_rh.pdf"},
     )
 

@@ -28,6 +28,9 @@ def app(tmp_path):
     application = create_app("testing")
     application.config["TESTING"] = True
     application.config["DATABASE_PATH"] = str(tmp_path / "financeiro_test.db")
+    # Mantém os testes de IA offline: sem chave real, o ai_service usa o
+    # fallback local determinístico (nunca chama a API DeepSeek).
+    application.config["DEEPSEEK_API_KEY"] = ""
     with application.app_context():
         init_db()
         init_rubrica_catalog(get_db())

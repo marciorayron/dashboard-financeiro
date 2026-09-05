@@ -323,3 +323,149 @@ body {
   line-height: 1.35;
 }
 .anomaly-var { font-size: 0.68rem; white-space: nowrap; }
+
+/* =====================================================================
+   Planejador de Poupança & Reserva
+   ===================================================================== */
+#savingsSlider {
+  accent-color: var(--df-primary);
+}
+#savingsSlider:focus {
+  box-shadow: 0 0 0 0.25rem rgba(59, 130, 246, 0.15);
+}
+
+/* =====================================================================
+   Jornada de Trabalho & Horas Extras — barra de divisão do overtime
+   ===================================================================== */
+.ot-split-legend {
+  font-size: 0.72rem;
+  color: var(--df-muted);
+}
+
+/* =====================================================================
+   Freemium — Plano, IA (pergunte), explicação de inconsistências
+   ===================================================================== */
+.admin-tabs .nav-link {
+  color: var(--df-muted);
+  border: 1px solid transparent;
+  border-radius: 10px 10px 0 0;
+  font-weight: 500;
+}
+.admin-tabs .nav-link.active {
+  color: var(--df-primary);
+  background: var(--df-surface);
+  border-color: var(--df-border);
+}
+.admin-tabs .nav-link:hover:not(.active) {
+  color: var(--df-text);
+}
+
+/* Menu "Ações" por linha na tabela de usuários (backoffice) */
+/* Garante que o dropdown sempre apareça por cima e não seja cortado pelo
+   contêiner de rolagem da tabela. */
+#pane-users .table-responsive {
+  overflow: visible;
+}
+#usersTable .admin-row-actions {
+  position: relative;
+  z-index: 20;
+}
+#usersTable .dropdown-toggle {
+  white-space: nowrap;
+}
+#usersTable .dropdown-menu {
+  position: absolute;
+  z-index: 2060;
+  background: var(--df-surface);
+  border: 1px solid var(--df-border);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.5);
+  font-size: 0.82rem;
+  min-width: 15rem;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+#usersTable .dropdown-item {
+  color: var(--df-text);
+  padding: 0.4rem 0.9rem;
+  display: flex;
+  align-items: center;
+}
+#usersTable .dropdown-item:hover {
+  background: rgba(59, 130, 246, 0.12);
+  color: var(--df-text);
+}
+#usersTable .dropdown-item.text-danger {
+  color: var(--df-danger);
+}
+#usersTable .dropdown-header {
+  color: var(--df-muted);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.plan-badge {
+  font-size: 0.72rem;
+  letter-spacing: 0.02em;
+  vertical-align: middle;
+}
+
+.ai-pill {
+  transition: all 0.15s ease;
+}
+.ai-pill:hover {
+  transform: translateY(-1px);
+}
+
+.ai-answer {
+  border: 1px solid var(--df-border);
+  background: var(--df-bg-2);
+  border-left: 3px solid var(--df-primary);
+  border-radius: 10px;
+  padding: 0.75rem 1rem;
+  color: var(--df-text);
+  line-height: 1.5;
+}
+
+.upgrade-benefits li {
+  padding: 0.25rem 0;
+}
+
+/* Drawer (popover) de explicação de inconsistência com IA */
+.ai-drawer {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  width: min(400px, calc(100vw - 2rem));
+  max-height: 55vh;
+  background: var(--df-surface);
+  border: 1px solid var(--df-primary);
+  border-radius: 14px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.55);
+  z-index: 1090;
+  overflow: hidden;
+  animation: aiDrawerIn 0.25s ease;
+}
+@keyframes aiDrawerIn {
+  from { transform: translateY(12px); opacity: 0; }
+  to   { transform: translateY(0); opacity: 1; }
+}
+.ai-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.6rem 0.9rem;
+  background: var(--df-primary);
+  color: #fff;
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+.ai-drawer-body {
+  padding: 0.9rem 1rem;
+  color: var(--df-text);
+  line-height: 1.5;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+

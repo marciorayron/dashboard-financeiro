@@ -294,14 +294,20 @@ def _progressive_inss(gross: float, db=None) -> float:
     if gross <= 0:
         return 0.0
     brackets = _get_inss_brackets(db)
+    # INSS tem TETO de salário de contribuição: acima da última faixa a base é
+    # capada (a contribuição não cresce com o excedente e nunca regride).
+    top_limit = brackets[-1][0]
+    if top_limit != float("inf") and gross > top_limit:
+        gross = top_limit
+
     prev_limit = 0.0
     for limit, rate, accum in brackets:
         if gross <= limit:
             return accum + (gross - prev_limit) * rate
         prev_limit = limit
-    # acima do teto: mantém a última faixa.
-    _, rate, accum = brackets[-1]
-    return accum + (gross - brackets[-1][0]) * rate
+    # Fallback de segurança (ex.: faixa final sem limite superior explícito).
+    limit, rate, accum = brackets[-1]
+    return accum + (gross - prev_limit) * rate
 
 
 def _progressive_irrf(taxable: float, dependents: int = 0, db=None) -> float:
@@ -428,6 +434,54 @@ def _is_operational(row) -> bool:
     return _norm_codigo(_row_get(row, "codigo")) in _OPERATIONAL_CODES
 
 
+def build_effective_hourly_views(
+    recurrent_net_pay: float,
+    extra_net: float,
+    monthly_hours: float,
+    extra_hours: float,
+    period_months: int,
+    contractual_hours_total: float,
+) -> dict:
+    """
+    Salário-hora efetivo nas DUAS visões aprovadas, com janelas coerentes.
+
+    Visão Mensal (R$/h média mensal):
+        net_mensal  = recurrent_net_pay + (extra_net / period_months)
+        horas_mensais = monthly_hours + (extra_hours / period_months)
+
+    Acumulado do Período (R$/h sobre todo o período):
+        net_periodo   = (recurrent_net_pay × period_months) + extra_net
+        horas_periodo = contractual_hours_total + extra_hours_total
+
+    `extra_net` e `extra_hours` representam o ACUMULADO do período (H.E. + DSR),
+    portanto são distribuídos por `period_months` na visão mensal.
+    """
+    period = max(int(period_months or 0), 1)
+
+    monthly_net = recurrent_net_pay + (extra_net / period)
+    monthly_hours_total = monthly_hours + (extra_hours / period)
+    period_net = (recurrent_net_pay * period) + extra_net
+    period_hours_total = contractual_hours_total + extra_hours
+
+    return {
+        "period_months": period,
+        "monthly": {
+            "net": round(monthly_net, 2),
+            "hours": round(monthly_hours_total, 2),
+            "rate": round(
+                _safe_div(monthly_net, monthly_hours_total), 4
+            ),
+        },
+        "period": {
+            "net": round(period_net, 2),
+            "hours": round(period_hours_total, 2),
+            "rate": round(
+                _safe_div(period_net, period_hours_total), 4
+            ),
+        },
+    }
+
+
 def get_advanced_analytics(
     user_id: int,
     mes_referencia: Optional[str] = None,
@@ -516,6 +570,11 @@ def get_advanced_analytics(
 
     complete_months = []
     for month in sorted(monthly_net.keys()):
+        if mes_referencia and month == mes_referencia:
+            # Regra aprovada (filtro de mês único): o mês selecionado NUNCA é
+            # tratado como parcial aqui — recurrent_net_pay = take-home real.
+            complete_months.append(month)
+            continue
         if month == current_month:
             continue  # mês atual (ainda incompleto)
         if "FERIAS" in month_types.get(month, set()):
@@ -622,7 +681,74 @@ def get_advanced_analytics(
         base_hourly, _baseline_gross = _profile_hourly_gross(profile)
     extra_gross = overtime_total + dsr_overtime_total
     extra_hours = _safe_div(extra_gross, base_hourly) if base_hourly > 0 else 0.0
-    extra_net = extra_gross * (1.0 - (effective_tax_rate / 100.0))
+
+    # Net das horas extras via IMPOSTO MARGINAL (não a alíquota média do mês).
+    # Aplica o INSS/IRRF marginal de acrescentar o extra_gross à base do mês —
+    # evita que picos artificiais de taxa média (ex.: 83%) colapsem o líquido.
+    dependents = int(getattr(profile, "irrf_dependents", 0) or 0) if profile else 0
+    if extra_gross > 0.0 and profile is not None:
+        base_gross = max(total_earnings - extra_gross, 0.0)
+        inss_base = _progressive_inss(base_gross, db)
+        inss_all = _progressive_inss(total_earnings, db)
+        irrf_base = _progressive_irrf(max(base_gross - inss_base, 0.0), dependents, db)
+        irrf_all = _progressive_irrf(max(total_earnings - inss_all, 0.0), dependents, db)
+        marginal_tax = max((inss_all - inss_base) + (irrf_all - irrf_base), 0.0)
+        extra_net = max(extra_gross - marginal_tax, 0.0)
+    else:
+        extra_net = extra_gross
+
+    # --- Jornada de Trabalho & Esforço (Work Hours & Effort Tracking) ---
+    # Card 1: horas contratuais totais no período (monthly_hours * meses).
+    # Card 2: horas extras trabalhadas no período (derivadas do bruto de H.E.).
+    # Card 3: divisão do overtime em patamares (50/70% até o limite vs. 100%).
+    period_months = len(monthly_net)
+    # Mês único filtrado: horas contratuais = pró-rata REAL pago no mês
+    # (base_salary recebida / valor-hora do perfil), em vez do teto fixo 220 h
+    # em meses parciais ou de férias.
+    if mes_referencia and period_months == 1 and base_hourly > 0.0:
+        worked = _safe_div(base_salary, base_hourly)
+        if 0.0 < worked <= monthly_hours:
+            monthly_hours = worked
+    contractual_hours_total = monthly_hours * period_months
+    tier1_limit = float(getattr(profile, "overtime_tier1_limit", 30.0) or 0.0)
+    tier1_rate = float(getattr(profile, "overtime_tier1_rate", 1.70) or 0.0)
+    tier2_rate = float(getattr(profile, "overtime_tier2_rate", 2.00) or 0.0)
+    extra_hours_total = extra_hours
+    # Salário-hora efetivo em ambas as visões aprovadas (Mensal / Período).
+    # Uses RAW values (sem os arredondamentos de exibição) p/ fórmulas exatas.
+    effective_hourly = build_effective_hourly_views(
+        recurrent_net_pay=recurrent_net_avg,
+        extra_net=extra_net,
+        monthly_hours=monthly_hours,
+        extra_hours=extra_hours_total,
+        period_months=period_months,
+        contractual_hours_total=contractual_hours_total,
+    )
+    tier1_hours = min(extra_hours_total, tier1_limit)
+    tier2_hours = max(extra_hours_total - tier1_limit, 0.0)
+    if extra_hours_total > 0:
+        tier1_pct = _safe_div(tier1_hours, extra_hours_total) * 100.0
+        tier2_pct = _safe_div(tier2_hours, extra_hours_total) * 100.0
+    else:
+        tier1_pct = 0.0
+        tier2_pct = 0.0
+    work_hours = {
+        "period_months": period_months,
+        "contractual_hours_total": round(contractual_hours_total, 1),
+        "monthly_hours": round(monthly_hours, 1),
+        "extra_hours_total": round(extra_hours_total, 1),
+        "overtime_split": {
+            "tier1_label": f"{tier1_rate:.2f}x (50/70%)",
+            "tier2_label": f"{tier2_rate:.2f}x (100%)",
+            "tier1_rate": round(tier1_rate, 2),
+            "tier2_rate": round(tier2_rate, 2),
+            "tier1_limit": round(tier1_limit, 1),
+            "tier1_hours": round(tier1_hours, 1),
+            "tier2_hours": round(tier2_hours, 1),
+            "tier1_pct": round(tier1_pct, 2),
+            "tier2_pct": round(tier2_pct, 2),
+        },
+    }
 
     return {
         "meta": {
@@ -677,6 +803,8 @@ def get_advanced_analytics(
                 ],
             },
         },
+        "effective_hourly": effective_hourly,
+        "work_hours": work_hours,
         "tax_rates": {
             "inss": {"amount": round(inss_amount, 2), "rate": round(inss_rate, 2)},
             "irrf": {"amount": round(irrf_amount, 2), "rate": round(irrf_rate, 2)},
@@ -821,7 +949,11 @@ _BENEFIT_AUDIT_CODES = {"4613", "4621", "4500"}  # Fretado, Refeitório, Saúde
 _NIGHT_AUDIT_CODES = {"1596", "1600", "1604", "1606", "1796", "1800", "1804", "1806"}
 
 
-def audit_paystub_anomalies(user_id: int) -> List[dict]:
+def audit_paystub_anomalies(
+    user_id: int,
+    mes_referencia: Optional[str] = None,
+    company_name: Optional[str] = None,
+) -> List[dict]:
     """
     Varre os paystubs históricos contra o perfil e médias móveis de 3 meses.
 
@@ -844,9 +976,11 @@ def audit_paystub_anomalies(user_id: int) -> List[dict]:
         FROM rubricas_holerite r
         JOIN holerites h ON h.id = r.holerite_id
         WHERE r.user_id = ?
+        """ + (" AND h.company_name = ?" if company_name else "")
+        + """
         ORDER BY h.mes_referencia ASC
         """,
-        [user_id],
+        [user_id] + ([company_name] if company_name else []),
     ).fetchall()
 
     months: dict = {}
@@ -927,6 +1061,7 @@ def audit_paystub_anomalies(user_id: int) -> List[dict]:
                                 "embora presente em meses anteriores."
                             ),
                             "month": m,
+                            "amount": 0.0,
                         }
                     )
 
@@ -945,11 +1080,17 @@ def audit_paystub_anomalies(user_id: int) -> List[dict]:
                         f"{cur_r:.1f}% entre {ordered[i-1]} e {ordered[i]}."
                     ),
                     "month": ordered[i],
+                    "amount": 0.0,
                 }
             )
 
     order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
     flags.sort(key=lambda f: order.get(f["severity"], 9))
+
+    # Escopo por competência: as médias móveis continuam usando o histórico,
+    # mas apenas as anomalias DO mês solicitado são retornadas.
+    if mes_referencia:
+        flags = [f for f in flags if f.get("month") == mes_referencia]
     return flags
 
 
@@ -1023,4 +1164,713 @@ def get_annual_financial_projection(profile, historical_data: Optional[dict] = N
             {"label": "PPR/PLR", "month": "Variável", "amount": round(ppr_avg, 2)},
         ],
     }
+
+
+
+# ---------------------------------------------------------------------
+# Projeção tributária anual (INSS & IRRF) — acumulado YTD + projetado
+# ---------------------------------------------------------------------
+def _monthly_retention_series(user_id: int, year: str) -> dict:
+    """
+    Retenções reais de INSS/IRRF por competência dentro de um ano.
+
+    Returns:
+        dict ordenado por mês: { 'YYYY-MM': {'inss': float, 'irrf': float} }
+    """
+    db = get_db()
+    rows = db.execute(
+        """
+        SELECT h.mes_referencia, r.codigo, r.descricao, r.valor
+        FROM rubricas_holerite r
+        JOIN holerites h ON h.id = r.holerite_id
+        WHERE r.user_id = ? AND h.mes_referencia LIKE ?
+        """,
+        [user_id, year + "-%"],
+    ).fetchall()
+
+    monthly: dict = {}
+    for row in rows:
+        month = str(_row_get(row, "mes_referencia") or "")[:7]
+        if not month:
+            continue
+        info = monthly.setdefault(month, {"inss": 0.0, "irrf": 0.0})
+        valor = _to_float(_row_get(row, "valor"))
+        if _is_inss(row):
+            info["inss"] += abs(valor)
+        elif _is_irrf(row):
+            info["irrf"] += abs(valor)
+    return dict(sorted(monthly.items()))
+
+
+def _monthly_gross_series(user_id: int, year: str) -> dict:
+    """
+    Série mensal de SALÁRIO BRUTO (total_earnings) por competência no ano.
+
+    Considera apenas holerites de tipo 'FOLHA_MENSAL' (exclui 13º/férias/PPR/
+    adiantamento, que distorceriam o baseline recorrente). Quando uma mesma
+    competência possui mais de um documento (ex.: fixtures com INSS/IRRF em
+    folhas separadas), usa o MAIOR bruto do mês para evitar dupla contagem.
+
+    Returns:
+        dict ordenado por mês: { 'YYYY-MM': float(gross) }
+    """
+    db = get_db()
+    rows = db.execute(
+        """
+        SELECT mes_referencia, totals
+        FROM holerites
+        WHERE user_id = ? AND mes_referencia LIKE ?
+              AND tipo_documento = 'FOLHA_MENSAL'
+        """,
+        [user_id, year + "-%"],
+    ).fetchall()
+
+    monthly: dict = {}
+    for row in rows:
+        month = str(_row_get(row, "mes_referencia") or "")[:7]
+        if not month:
+            continue
+        gross = _to_float(_load_totals(row).get("total_earnings"))
+        monthly[month] = max(monthly.get(month, 0.0), gross)
+    return dict(sorted(monthly.items()))
+
+
+def _monthly_gross_values(user_id: int, year: str) -> List[float]:
+    """Lista ordenada dos salários brutos mensais reais (>0) do ano."""
+    return [v for v in _monthly_gross_series(user_id, year).values() if v > 0.0]
+
+
+def _projected_monthly_gross(
+    method: str, gross_series: List[float], profile_gross: float
+) -> float:
+    """
+    Salário bruto mensal projetado (baseline ÚNICO) conforme o método.
+
+      * Com histórico: projeta a partir dos grosses reais (mesma heurística
+        do `_project_rate`: run-rate / tendência 3M / média YTD).
+      * Sem histórico: recorre ao gross teórico do perfil (anchor estável),
+        para não zerar a projeção nem perder coerência.
+    """
+    if gross_series:
+        return max(float(_project_rate(method, gross_series)), 0.0)
+    return max(float(profile_gross or 0.0), 0.0)
+
+
+def _projected_monthly_taxes(
+    projected_gross: float, dependents: int, db=None
+) -> tuple:
+    """
+    Calcula INSS e IRRF MENSais a partir de UM ÚNICO gross projetado.
+
+    Garantias matemáticas:
+      * INSS  = tabela progressiva oficial sobre projected_gross (capped no
+                máximo mensal de contribuição legal).
+      * IRRF  = tabela progressiva sobre a MESMA base, abatendo o INSS
+                calculado acima: Base = gross - INSS - dedução por dependente.
+    """
+    raw_inss = _progressive_inss(projected_gross, db)
+    max_monthly_inss = _inss_max_monthly_contribution(db)
+    monthly_inss = (
+        round(min(raw_inss, max_monthly_inss), 2)
+        if max_monthly_inss > 0.0
+        else round(raw_inss, 2)
+    )
+    taxable = max(projected_gross - monthly_inss, 0.0)
+    monthly_irrf = round(_progressive_irrf(taxable, dependents, db), 2)
+    return monthly_inss, monthly_irrf
+
+
+def _project_rate(method: str, values: List[float]) -> float:
+    """
+    Taxa mensal projetada de retenção conforme o método escolhido.
+
+      * last_month : usa o valor da competência mais recente (run-rate).
+      * trend      : regressão linear sobre as últimas 3 observações,
+                     projetando a competência seguinte (nunca negativa).
+      * average    : média de todas as observações (YTD).
+
+    Args:
+        method (str): 'average', 'trend' ou 'last_month'.
+        values (List[float]): série ordenada (mês a mês) de retenção.
+
+    Returns:
+        float: taxa mensal projetada (>= 0).
+    """
+    if not values:
+        return 0.0
+    if method == "last_month":
+        return float(values[-1])
+    if method == "trend":
+        window = values[-3:] if len(values) >= 3 else values
+        if len(window) < 2:
+            return float(window[-1])
+        n = len(window)
+        xs = list(range(n))
+        mean_x = sum(xs) / n
+        mean_y = sum(window) / n
+        denom = sum((x - mean_x) ** 2 for x in xs)
+        slope = 0.0
+        if denom:
+            slope = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, window)) / denom
+        intercept = mean_y - slope * mean_x
+        return max(intercept + slope * n, 0.0)
+    # average: média de todas as competências YTD.
+    return sum(values) / len(values)
+
+
+def _inss_max_monthly_contribution(db=None) -> float:
+    """
+    Contribuição mensal máxima de INSS (teto do salário de contribuição).
+
+    Corresponde ao INSS progressivo aplicado ao teto da faixa mais alta —
+    o valor máximo que um trabalhador paga em um único mês.
+    """
+    brackets = _get_inss_brackets(db)
+    if not brackets:
+        return 0.0
+    top_limit = brackets[-1][0]
+    return _progressive_inss(top_limit, db)
+
+
+def _inss_annual_ceiling(db=None) -> float:
+    """
+    Teto anual de INSS (soma das contribuições máximas mensais do ano).
+
+    Quando o INSS acumulado no ano (YTD) atinge esse teto, os meses seguintes
+    passam a reter R$ 0,00 de INSS — motivo pelo qual run-rate/tendência podem
+    "zerar" indevidamente se as retenções forem interpretadas sem considerar o
+    teto.
+    """
+    return round(_inss_max_monthly_contribution(db) * 12, 2)
+
+
+
+def get_tax_projection(user_id: int, method: str = "average") -> dict:
+    """
+    Projeção tributária anual acumulada (INSS & IRRF) com métodos dinâmicos.
+
+    Calcula:
+        * ytd: retenções REAIS de INSS e IRRF acumuladas no ano corrente.
+        * monthly: SALÁRIO BRUTO mensal projetado (baseline ÚNICO pelo método)
+          e os INSS/IRRF MENSais derivados desse mesmo gross pelas tabelas
+          oficiais (IRRF abate o INSS calculado + dependentes).
+        * series: retenções reais mês a mês (contexto/tendência, exibição).
+        * projected: retenções projetadas para os meses restantes até dezembro.
+        * annual: projeção anual total (real + projetado) e baseline líquido.
+
+    Nota de coerência: INSS e IRRF nunca são extrapolados de séries históricas
+    isoladas de retenção — ambos são recalculados a partir de um único gross
+    projetado, impedindo pares matematicamente impossíveis (ex.: INSS alto com
+    IRRF artificialmente baixo).
+
+    Args:
+        user_id (int): usuário autenticado (isolamento multi-tenant).
+        method (str): 'average' (média YTD), 'trend' (regressão últimos 3M)
+            ou 'last_month' (run-rate do último paystub).
+
+    Returns:
+        dict com seções `year`, `month_now`, `remaining_months`, `method`,
+        `monthly`, `series`, `ytd`, `projected` e `annual`.
+    """
+    import datetime
+
+    method = (method or "average").lower()
+    if method not in ("average", "trend", "last_month"):
+        method = "average"
+
+    db = get_db()
+    from models.profile import load_profile
+
+    profile = load_profile(db, user_id)
+
+    today = datetime.date.today()
+    year = str(today.year)
+
+    # Série mensal real de retenções no ano corrente.
+    monthly_series = _monthly_retention_series(user_id, year)
+    inss_series = [m["inss"] for m in monthly_series.values()]
+    irrf_series = [m["irrf"] for m in monthly_series.values()]
+    ytd_inss = sum(inss_series)
+    ytd_irrf = sum(irrf_series)
+
+    # Perfil (âncora teórica quando não há folha no ano e para exibição).
+    dependents = int(getattr(profile, "irrf_dependents", 0) or 0) if profile else 0
+    profile_gross = 0.0
+    theoretical_inss = 0.0
+    theoretical_irrf = 0.0
+    if profile is not None:
+        _, profile_gross = _profile_hourly_gross(profile)
+        theoretical_inss = _progressive_inss(profile_gross, db)
+        theoretical_irrf = _progressive_irrf(
+            profile_gross - theoretical_inss, dependents, db
+        )
+
+    month_now = today.month
+    remaining_months = max(12 - month_now, 0)
+
+    # ------------------------------------------------------------------
+    # 1) BASELINE ÚNICO — salário bruto mensal projetado pelo método.
+    #    INSS e IRRF NUNCA são extrapolados de séries isoladas de retenção;
+    #    ambos derivam DESTE projected_gross, usando as tabelas oficiais.
+    # ------------------------------------------------------------------
+    gross_series = _monthly_gross_values(user_id, year)
+    projected_gross = _projected_monthly_gross(method, gross_series, profile_gross)
+
+    # 2) INSS e IRRF mensais calculados do MESMO gross projetado:
+    #      INSS    = tabela progressiva sobre projected_gross (capped mensal).
+    #      Base IRRF = projected_gross - INSS_calculado - dedução por dependente.
+    monthly_inss, monthly_irrf = _projected_monthly_taxes(
+        projected_gross, dependents, db
+    )
+    monthly_net = round(max(projected_gross - monthly_inss - monthly_irrf, 0.0), 2)
+    monthly_gross = round(projected_gross, 2)
+
+    # 3) TETO ANUAL DE INSS: se inss_ytd + (INSS mensal × meses restantes)
+    #    exceder o teto legal, a projeção INSS remanescente é limitada ao
+    #    headroom restante (flag `inss_capped`). O IRRF mantém-se coerente.
+    inss_ceiling = _inss_annual_ceiling(db)
+    inss_capped = False
+    wanted_inss = round(monthly_inss * remaining_months, 2)
+    if inss_ceiling > 0:
+        inss_remaining_headroom = max(round(inss_ceiling - ytd_inss, 2), 0.0)
+        if wanted_inss > inss_remaining_headroom + 0.005:
+            inss_capped = True
+            projected_inss = inss_remaining_headroom
+        else:
+            projected_inss = wanted_inss
+    else:
+        projected_inss = wanted_inss
+    projected_irrf = round(monthly_irrf * remaining_months, 2)
+
+    notes = []
+    if inss_capped:
+        notes.append(
+            "Teto do INSS anual alcançado: retenções adicionais limitadas "
+            f"ao headroom legal (R$ {inss_remaining_headroom:,.2f})."
+        )
+
+    return {
+        "year": year,
+        "month_now": month_now,
+        "remaining_months": remaining_months,
+        "method": method,
+        "inss_capped": inss_capped,
+        "notes": notes,
+        "monthly": {
+            "gross": round(monthly_gross, 2),
+            "net": round(monthly_net, 2),
+            "inss": monthly_inss,
+            "irrf": monthly_irrf,
+            "theoretical_inss": round(theoretical_inss, 2),
+            "theoretical_irrf": round(theoretical_irrf, 2),
+            "inss_capped": inss_capped,
+        },
+        "series": {
+            "months": list(monthly_series.keys()),
+            "inss": [round(v, 2) for v in inss_series],
+            "irrf": [round(v, 2) for v in irrf_series],
+        },
+        "ytd": {
+            "inss": round(ytd_inss, 2),
+            "irrf": round(ytd_irrf, 2),
+        },
+        "projected": {
+            "inss": projected_inss,
+            "irrf": projected_irrf,
+        },
+        "annual": {
+            "inss": round(ytd_inss + projected_inss, 2),
+            "irrf": round(ytd_irrf + projected_irrf, 2),
+            "inss_ceiling": inss_ceiling,
+            "net_baseline": round(monthly_net * 12, 2),
+        },
+    }
+
+
+
+# ---------------------------------------------------------------------
+# Inconsistências — breakdown itemizado do total monetário
+# ---------------------------------------------------------------------
+def get_inconsistency_breakdown(user_id: int) -> dict:
+    """
+    Quebra itemizada do total R$ das inconsistências detectadas.
+
+    Retorna o total monetário e cada item, garantindo que todo item possua
+    a chave `amount` (0.0 quando não é uma discrepância puramente monetária).
+
+    Returns:
+        dict: {"total", "count", "items": [{severity, category, title,
+        description, month, amount}]}
+    """
+    flags = audit_paystub_anomalies(user_id)
+    total = sum(float(f.get("amount") or 0.0) for f in flags)
+    return {
+        "total": round(total, 2),
+        "count": len(flags),
+        "items": flags,
+    }
+
+
+# ---------------------------------------------------------------------
+# Contexto mensal para a IA (temporal / por competência)
+# ---------------------------------------------------------------------
+def build_ai_paystub_context(user_id: int) -> dict:
+    """
+    Constrói o contexto mensal (mês a mês) dos holerites do usuário para a IA.
+
+    Lista as competências de SALÁRIO MENSAL (estritamente `FOLHA_MENSAL`,
+    excluindo PPR/13º/adiantamento/férias) com bruto/líquido/INSS/IRRF, tags
+    de categoria (`categoria`) e competência (`mes_referencia`), além dos
+    agregados globais (YTD e médias). PPR/adiantamento nunca contam como base
+    ou salário regular de um mês. Permite à IA responder perguntas temporais,
+    ex.: "qual o menor e o maior salário e em quais meses?".
+
+    Returns:
+        dict: {"monthly": [...], "aggregates": {...}}
+    """
+    db = get_db()
+    rows = db.execute(
+        """
+        SELECT h.id, h.mes_referencia, h.totals
+        FROM holerites h
+        WHERE h.user_id = ?
+              AND h.mes_referencia IS NOT NULL
+              AND TRIM(h.mes_referencia) != ''
+              AND UPPER(COALESCE(h.tipo_documento, '')) = 'FOLHA_MENSAL'
+        ORDER BY h.mes_referencia ASC, h.id ASC
+        """,
+        [user_id],
+    ).fetchall()
+
+    # Rubricas/retensões restritas aos MESMOS documentos FOLHA_MENSAL (não
+    # misturamos PPR/13º/adiantamento com o salário mensal da competência).
+    rub_rows = db.execute(
+        """
+        SELECT h.id AS holerite_id, r.codigo, r.descricao, r.tipo, r.valor
+        FROM rubricas_holerite r
+        JOIN holerites h ON h.id = r.holerite_id
+        WHERE r.user_id = ?
+              AND UPPER(COALESCE(h.tipo_documento, '')) = 'FOLHA_MENSAL'
+        ORDER BY h.mes_referencia ASC, h.id ASC
+        """,
+        [user_id],
+    ).fetchall()
+
+    taxes_by_doc: dict = {}
+    rubrics_by_doc: dict = {}
+    for r in rub_rows:
+        doc_id = _row_get(r, "holerite_id")
+        valor = _to_float(_row_get(r, "valor"))
+        taxes = taxes_by_doc.setdefault(doc_id, {"inss": 0.0, "irrf": 0.0})
+        if _is_inss(r):
+            taxes["inss"] += abs(valor)
+        elif _is_irrf(r):
+            taxes["irrf"] += abs(valor)
+
+        descricao = str(_row_get(r, "descricao") or "").strip()
+        if descricao:
+            bucket = rubrics_by_doc.setdefault(doc_id, {})
+            bucket[descricao] = round(bucket.get(descricao, 0.0) + abs(valor), 2)
+
+    # Um registro por competência (salário mensal real). Se a mesma competência
+    # tiver mais de um FOLHA_MENSAL (ex.: INSS/IRRF em folha separada), usa o
+    # documento de MAIOR bruto — evita dupla contagem, igual a _monthly_gross_series.
+    best_by_month: dict = {}
+    for row in rows:
+        comp = str(_row_get(row, "mes_referencia") or "")[:7]
+        if not comp:
+            continue
+        totals = _load_totals(row)
+        gross = _to_float(totals.get("total_earnings"))
+        cur = best_by_month.get(comp)
+        if cur is None or gross > cur["gross"]:
+            doc_id = row["id"]
+            best_by_month[comp] = {
+                "gross": gross,
+                "net": _to_float(totals.get("net_value")),
+                "inss": round(taxes_by_doc.get(doc_id, {}).get("inss", 0.0), 2),
+                "irrf": round(taxes_by_doc.get(doc_id, {}).get("irrf", 0.0), 2),
+                "rubrics": rubrics_by_doc.get(doc_id, {}),
+            }
+
+    monthly: List[dict] = []
+    for comp in sorted(best_by_month.keys()):
+        b = best_by_month[comp]
+        monthly.append(
+            {
+                "competencia": comp,
+                "mes_referencia": comp,
+                "categoria": "FOLHA_MENSAL",
+                "gross": round(b["gross"], 2),
+                "net": round(b["net"], 2),
+                "inss": b["inss"],
+                "irrf": b["irrf"],
+                "rubrics": b["rubrics"],
+            }
+        )
+
+    if not monthly:
+        return {"monthly": [], "aggregates": {}}
+
+    grosses = [m["gross"] for m in monthly]
+    nets = [m["net"] for m in monthly]
+    aggregates = {
+        "count": len(monthly),
+        "ytd_gross": round(sum(grosses), 2),
+        "ytd_net": round(sum(nets), 2),
+        "ytd_inss": round(sum(m["inss"] for m in monthly), 2),
+        "ytd_irrf": round(sum(m["irrf"] for m in monthly), 2),
+        "avg_gross": round(sum(grosses) / len(grosses), 2),
+        "avg_net": round(sum(nets) / len(nets), 2),
+        "min_gross": round(min(grosses), 2),
+        "max_gross": round(max(grosses), 2),
+        "min_month": monthly[grosses.index(min(grosses))]["competencia"],
+        "max_month": monthly[grosses.index(max(grosses))]["competencia"],
+    }
+    return {"monthly": monthly, "aggregates": aggregates}
+
+
+# ---------------------------------------------------------------------
+# Explicação de cards com IA (Explain ✨) — escopo por card/mês/empresa
+# ---------------------------------------------------------------------
+def _brl(value) -> str:
+    """Formata valor como moeda pt-BR (R$ 1.234,56)."""
+    try:
+        return "R$ " + f"{float(value or 0.0):,.2f}".replace(
+            ",", "§"
+        ).replace(".", ",").replace("§", ".")
+    except (TypeError, ValueError):
+        return "R$ 0,00"
+
+
+# Títulos human-readable de cada card suportado pelo Explain ✨. A chave
+# técnica (snake_case) NUNCA deve aparecer no markdown/erros — apenas o rótulo.
+_CARD_TITLES = {
+    "recurrent_net": "Líquido Recorrente Efetivo",
+    "salario_hora": "Salário-Hora Efetivo",
+    "overtime_vulnerability": "Vulnerabilidade de Horas Extras",
+    "effective_tax_rate": "Alíquota Efetiva de Retenção",
+    "projecao_anual": "Projeção de Entrada Anual",
+    "inconsistencias": "Inconsistências Identificadas",
+}
+
+# Mapa de vazamentos de termos técnicos que o markdown/IA pode reproduzir.
+# Aplicado como saneamento final em get_card_explanation e após o refine da IA.
+_EXPLAIN_LEAK_MAP = dict(_CARD_TITLES)
+_EXPLAIN_LEAK_MAP["net_value"] = "valor líquido"
+
+
+def humanize_explanation(text) -> str:
+    """Substitui termos técnicos (snake_case) por rótulos human-readable pt-BR.
+
+    Remove qualquer resquício de identificadores com underline (ex.: a IA pode
+    reproduzir `effective_tax_rate`, `net_value` etc.). O mapa cobre as chaves
+    dos cards + `net_value`; como último recurso, um token restante com
+    underline é "achatado" para espaços (nunca expõe snake_case ao usuário).
+    """
+    if not text:
+        return ""
+    out = str(text)
+    for term, label in _EXPLAIN_LEAK_MAP.items():
+        out = re.sub(
+            r"(?<![A-Za-z0-9_])" + re.escape(term) + r"(?![A-Za-z0-9_])",
+            label,
+            out,
+        )
+    # Rede de segurança: qualquer snake_case remanescente vira texto espaçado.
+    out = re.sub(
+        r"\b([A-Za-zÀ-ÿ0-9]+(?:_[A-Za-zÀ-ÿ0-9]+)+)\b",
+        lambda m: m.group(1).replace("_", " "),
+        out,
+    )
+    return out
+
+
+def _explain_advanced_card(
+    card_id: str, user_id: int, mes_referencia=None, company_name=None
+) -> Optional[str]:
+    """Explicações dos cards alimentados por /analytics/advanced."""
+    data = get_advanced_analytics(
+        user_id, mes_referencia=mes_referencia, company_name=company_name
+    )
+    meta = data.get("meta") or {}
+    overtime = data.get("overtime") or {}
+    eff = data.get("effective_hourly") or {}
+    taxes = data.get("tax_rates") or {}
+    scope = (mes_referencia or "todo o período")
+
+    if card_id == "recurrent_net":
+        avg = meta.get("recurrent_net_pay") or 0.0
+        months = meta.get("recurrent_net_months") or 0
+        theoretical = meta.get("theoretical_recurrent_net") or 0.0
+        return "\n".join(
+            [
+                f"- **O que representa:** Líquido recorrente médio de {months} mês(es) "
+                f"completo(s) em {scope} — {_brl(avg)}/mês.",
+                f"- **Insight do período:** Take-home recorrente {_brl(avg)}. "
+                f"Referência teórica do perfil: {_brl(theoretical)}.",
+                "- **Como é calculado:** soma do valor líquido (take-home) dos holerites "
+                "dos meses completos ÷ nº de meses completos (regra de mês único respeitada).",
+            ]
+        )
+
+    if card_id == "salario_hora":
+        monthly = eff.get("monthly") or {}
+        rate = monthly.get("rate") or 0.0
+        net = monthly.get("net") or 0.0
+        hours = monthly.get("hours") or 0.0
+        return "\n".join(
+            [
+                f"- **O que representa:** Salário-hora efetivo em {scope} "
+                f"({_brl(net)} / {hours:g} h = {_brl(rate)}/h).",
+                f"- **Insight do período:** Cada hora útil rendeu {_brl(rate)} "
+                f"considerando líquido recorrente + H.E./DSR.",
+                "- **Como é calculado:** (líquido recorrente + net de H.E. ÷ meses) "
+                "÷ (horas contratuais pró-rata + horas de H.E. ÷ meses).",
+            ]
+        )
+
+    if card_id == "overtime_vulnerability":
+        total = (overtime.get("total") or 0.0) + (overtime.get("dsr_overtime") or 0.0)
+        ratio = overtime.get("ratio") or 0.0
+        high = "ALTO" if ratio >= 30 else ("MODERADO" if ratio >= 15 else "baixo")
+        return "\n".join(
+            [
+                f"- **O que representa:** Dependência de horas extras em {scope}: "
+                f"{_brl(total)} ({ratio:g}% dos proventos).",
+                f"- **Insight do período:** Nível de dependência {high}; quanto maior, "
+                f"maior a variabilidade do líquido.",
+                "- **Como é calculado:** (H.E. + DSR sobre H.E.) ÷ total de proventos "
+                "× 100, dentro do filtro ativo.",
+            ]
+        )
+
+    if card_id == "effective_tax_rate":
+        # Hidrata o card "Alíquota Efetiva de Retenção" com a decomposição real
+        # INSS + IRRF já calculada em get_advanced_analytics (tax_rates).
+        inss = taxes.get("inss") or {}
+        irrf = taxes.get("irrf") or {}
+        inss_rate = inss.get("rate") or 0.0
+        irrf_rate = irrf.get("rate") or 0.0
+        inss_amount = inss.get("amount") or 0.0
+        irrf_amount = irrf.get("amount") or 0.0
+        gross = meta.get("total_earnings") or 0.0
+        retention = inss_rate + irrf_rate
+        return "\n".join(
+            [
+                f"- **O que representa:** Alíquota efetiva de retenção em {scope} — "
+                f"{retention:g}% dos proventos brutos, decomposta em INSS "
+                f"{inss_rate:g}% ({_brl(inss_amount)}) + IRRF {irrf_rate:g}% "
+                f"({_brl(irrf_amount)}).",
+                f"- **Insight do período:** Para cada R$ 100 brutos, {retention:g}% "
+                f"ficam retidos em INSS e IRRF (sobre {_brl(gross)} de proventos).",
+                "- **Como é calculado:** (INSS + IRRF) ÷ total de proventos × 100, "
+                "usando as rubricas de retenção do período/filtro ativo.",
+            ]
+        )
+
+    return None
+
+
+def _explain_anomalies_card(
+    user_id: int, mes_referencia=None, company_name=None
+) -> str:
+    """Explicação do card de inconsistências (auditoria escopável)."""
+    flags = audit_paystub_anomalies(
+        user_id, mes_referencia=mes_referencia, company_name=company_name
+    )
+    total = sum(float(f.get("amount") or 0.0) for f in flags)
+    scope = (mes_referencia or company_name or "todo o histórico")
+    top = None
+    if flags:
+        counts: dict = {}
+        for f in flags:
+            counts[f.get("category", "?")] = counts.get(f.get("category", "?"), 0) + 1
+        top = max(counts.items(), key=lambda kv: kv[1])[0]
+    return "\n".join(
+        [
+            f"- **O que representa:** Inconsistências/alertas em {scope}: "
+            f"{len(flags)} ocorrência(s), impacto total {_brl(total)}.",
+            f"- **Insight do período:**"
+            + (f" Categoria mais frequente: {top}." if top else " Nenhum alerta relevante."),
+            "- **Como é calculado:** auditoria mês a mês (médias móveis de 3 meses de "
+            "benefícios, adicional noturno e faixa de IRRF) filtrada pelo card.",
+        ]
+    )
+
+
+def _explain_annual_card(user_id: int) -> str:
+    """Explicação do card global de Projeção de Entrada Anual."""
+    from models.profile import load_profile as _load_profile
+
+    db = get_db()
+    profile = _load_profile(db, user_id)
+    if profile is None:
+        return "\n".join(
+            [
+                "- **O que representa:** Projeção de entrada anual (Acumulado Global).",
+                "- **Insight do período:** Configure o perfil para ver a projeção.",
+                "- **Como é calculado:** 12× líquido recorrente + 13º + férias + PPR.",
+            ]
+        )
+    ppr_avg = 0.0
+    rows = db.execute(
+        "SELECT totals FROM holerites WHERE user_id=? AND tipo_documento='PPR'",
+        [user_id],
+    ).fetchall()
+    if rows:
+        nets = []
+        for r in rows:
+            try:
+                nets.append(float((_load_totals(r)).get("net_value") or 0.0))
+            except (ValueError, TypeError):
+                continue
+        ppr_avg = (sum(nets) / len(nets)) if nets else 0.0
+    projection = get_annual_financial_projection(profile, {"ppr_avg": ppr_avg})
+    total = projection.get("total_annual_take_home") or 0.0
+    baseline = projection.get("baseline_annual") or 0.0
+    return "\n".join(
+        [
+            "- **O que representa:** Projeção de entrada anual (Acumulado Global) — "
+            f"{_brl(total)} ao ano.",
+            f"- **Insight do período:** Baseline 12m {_brl(baseline)} mais 13º, férias "
+            "(1/3) e PPR; métrica NÃO muda ao filtrar por mês/empresa.",
+            "- **Como é calculado:** (líquido recorrente × 12) + 13º + férias(1/3) + PPR.",
+        ]
+    )
+
+
+def get_card_explanation(
+    db,
+    user_id: int,
+    card_id: str,
+    mes_referencia=None,
+    company_name=None,
+) -> dict:
+    """
+    Gera explicação concisa (3 bullets) de um card do dashboard, escopada por
+    mês/empresa quando o card é dinâmico. Cards anuais permanecem globais.
+    """
+    card_id = (card_id or "").strip()
+    title = _CARD_TITLES.get(card_id)
+    if title is None:
+        # NUNCA ecoa a chave técnica (snake_case) em mensagens de erro.
+        raise ValueError("Card não suportado para explicação.")
+
+    md = _explain_advanced_card(
+        card_id, user_id, mes_referencia=mes_referencia, company_name=company_name
+    )
+    if md is None and card_id == "inconsistencias":
+        md = _explain_anomalies_card(
+            user_id, mes_referencia=mes_referencia, company_name=company_name
+        )
+    if md is None and card_id == "projecao_anual":
+        md = _explain_annual_card(user_id)
+
+    if md is None:
+        raise ValueError("Card não suportado para explicação.")
+
+    # Saneamento final: garante que nenhuma chave técnica (snake_case) escape.
+    return {"card_id": card_id, "title": title, "markdown": humanize_explanation(md)}
+
 
