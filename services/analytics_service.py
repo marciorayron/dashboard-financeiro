@@ -106,9 +106,140 @@ def get_user_totals(user_id: int, mes_referencia: Optional[str] = None) -> dict:
     }
 
 
+# ---------------------------------------------------------------------
+# Contexto de férias (ciclo real) para a série mensal "Renda Líquida x Bruta"
+# ---------------------------------------------------------------------
+# Em um ciclo de férias, o salário é adiantado na folha FERIAS e a FOLHA_MENSAL
+# do mês em que o colaborador retorna sai com o líquido "abatido" (reduzido pelo
+# adiantamento). Este módulo marca esse mês de folha abatida e reconstrói o
+# fluxo de caixa efetivo do ciclo (folha abatida + adiantamento quinzenal do
+# próprio mês + net das férias antecipadas recebidas no mês de crédito).
+_VACATION_ABATE_RATIO = 0.55      # folha líquida < 55% da mediana => folha abatida
+_VACATION_CREDIT_WINDOW = 2       # crédito FERIAS pode estar até 2 meses antes
+
+
+def _ym_key(mes_referencia) -> Optional[tuple]:
+    """Converte 'YYYY-MM' em (ano, mês); retorna None se inválido."""
+    s = str(mes_referencia or "").strip()
+    if len(s) >= 7 and s[4] == "-":
+        try:
+            return (int(s[:4]), int(s[5:7]))
+        except ValueError:
+            return None
+    return None
+
+
+def _ym_serial(ym: tuple) -> int:
+    """Serializa (ano, mês) em um inteiro monotônico p/ diferenças."""
+    year, month = ym
+    return year * 12 + (month - 1)
+
+
+def _median(values) -> float:
+    """Mediana simples (Python puro, sem dependência de numpy)."""
+    vals = sorted(float(v) for v in values if v is not None)
+    if not vals:
+        return 0.0
+    n = len(vals)
+    mid = n // 2
+    if n % 2 == 1:
+        return vals[mid]
+    return (vals[mid - 1] + vals[mid]) / 2.0
+
+
+def _vacation_events(db, user_id: int, folhas: dict) -> dict:
+    """Detecta meses de FOLHA_MENSAL 'abatida' por ciclo de férias.
+
+    Args:
+        db: conexão SQLite ativa.
+        user_id: usuário autenticado (isolamento multi-tenant).
+        folhas: dict {mes('YYYY-MM'): {'gross','net','totals'}} — folhas
+            FOLHA_MENSAL já deduplicadas pelo MAIOR bruto (mesma regra usada
+            em `get_monthly_series`).
+
+    Returns:
+        dict mes -> metadata do ciclo de férias:
+            is_vacation_month: True
+            vacation_net_prepayment:  net do FERIAS (crédito) do ciclo
+            month_adiantamento_net:   net dos ADIANTAMENTOS do próprio mês
+            total_effective_cashflow: folha abatida + adiantamento + férias
+    """
+    # 1) Créditos FERIAS (net) — o mês do crédito costuma anteceder a folha.
+    ferias_credits: List[tuple] = []
+    for row in db.execute(
+        "SELECT mes_referencia, totals FROM holerites "
+        "WHERE user_id = ? AND UPPER(COALESCE(tipo_documento, '')) = 'FERIAS'",
+        [user_id],
+    ).fetchall():
+        ym = _ym_key(row["mes_referencia"])
+        if not ym:
+            continue
+        net = _to_float(_load_totals(row).get("net_value"))
+        ferias_credits.append((ym, net))
+    if not ferias_credits:
+        return {}
+
+    # 2) ADIANTAMENTO (quinzenal) líquido por mês — compõe o cashflow do mês.
+    adi_by_month: dict = {}
+    for row in db.execute(
+        "SELECT mes_referencia, totals FROM holerites "
+        "WHERE user_id = ? AND UPPER(COALESCE(tipo_documento, '')) = 'ADIANTAMENTO'",
+        [user_id],
+    ).fetchall():
+        ym = _ym_key(row["mes_referencia"])
+        if not ym:
+            continue
+        net = _to_float(_load_totals(row).get("net_value"))
+        adi_by_month[ym] = adi_by_month.get(ym, 0.0) + net
+
+    # 3) Linha de base: mediana das folhas líquidas p/ reconhecer folha abatida.
+    nets = [v.get("net", 0.0) for v in folhas.values() if v.get("net", 0.0) > 0.0]
+    baseline = _median(nets)
+
+    events: dict = {}
+    if baseline <= 0.0:
+        return events
+    for mes, item in folhas.items():
+        ym = _ym_key(mes)
+        if not ym:
+            continue
+        net = float(item.get("net") or 0.0)
+        # Folha abatida: líquido muito abaixo da mediana (não é folha normal).
+        if net <= 0.0 or net >= _VACATION_ABATE_RATIO * baseline:
+            continue
+        serial = _ym_serial(ym)
+        # FERIAS que possa explicar o abate (mesmo mês ou até N meses antes).
+        candidates = [
+            c for c in ferias_credits
+            if _ym_serial(c[0]) <= serial
+            and (serial - _ym_serial(c[0])) <= _VACATION_CREDIT_WINDOW
+        ]
+        if not candidates:
+            continue
+        # Usa o crédito FERIAS mais recente que ainda cobre o abate.
+        _, vacation_net = max(candidates, key=lambda c: _ym_serial(c[0]))
+        adi_net = adi_by_month.get(ym, 0.0)
+        events[mes] = {
+            "is_vacation_month": True,
+            "vacation_net_prepayment": round(vacation_net, 2),
+            "month_adiantamento_net": round(adi_net, 2),
+            "total_effective_cashflow": round(net + adi_net + vacation_net, 2),
+        }
+    return events
+
+
+
 def get_monthly_series(user_id: int, company_name: Optional[str] = None) -> List[dict]:
     """
-    Retorna a série temporal mensal (bruto x líquido) do usuário.
+    Série temporal mensal (bruto x líquido) do usuário.
+
+    Estritamente FOLHA_MENSAL: documentos ADIANTAMENTO/PPR/13_SALARIO/FERIAS
+    NÃO entram como salário mensal (inflariam o bruto). Quando a mesma
+    competência tem mais de um documento FOLHA_MENSAL (ex.: INSS/IRRF em
+    folha separada), usa-se o documento de MAIOR bruto (`total_earnings`),
+    e tanto `gross` quanto `net` vêm desse MESMO documento vencedor —
+    sem misturar linhas. Competências sem nenhum FOLHA_MENSAL fechado são
+    omitidas do eixo.
 
     Returns:
         List[dict]: um item por mês com chaves mes, gross, net.
@@ -118,6 +249,7 @@ def get_monthly_series(user_id: int, company_name: Optional[str] = None) -> List
         SELECT mes_referencia, totals
         FROM holerites
         WHERE user_id = ? AND mes_referencia IS NOT NULL
+              AND tipo_documento = 'FOLHA_MENSAL'
     """
     params: List = [user_id]
 
@@ -128,15 +260,37 @@ def get_monthly_series(user_id: int, company_name: Optional[str] = None) -> List
     query += " ORDER BY mes_referencia ASC"
     rows = db.execute(query, params).fetchall()
 
-    series = {}
+    # Uma competência -> documento FOLHA_MENSAL de MAIOR bruto.
+    # Deduplica folhas divididas (INSS/IRRF em doc separado) do mesmo mês e
+    # garante que gross/net venham estritamente do mesmo registro vencedor.
+    best: dict = {}  # mes -> {"gross": float, "net": float, "totals": dict}
     for row in rows:
+        mes = str(row["mes_referencia"] or "")[:7]
+        if not mes:
+            continue
         totals = _load_totals(row)
-        mes = row["mes_referencia"]
-        item = series.setdefault(mes, {"mes": mes, "gross": 0.0, "net": 0.0})
-        item["gross"] += _to_float(totals.get("total_earnings"))
-        item["net"] += _to_float(totals.get("net_value"))
+        gross = _to_float(totals.get("total_earnings"))
+        net = _to_float(totals.get("net_value"))
+        current = best.get(mes)
+        if current is None or gross > current["gross"]:
+            best[mes] = {"gross": gross, "net": net, "totals": totals}
 
-    return list(series.values())
+    # Contexto de férias (ciclo real): marca o mês da FOLHA 'abatida' (o líquido
+    # cai porque o salário foi adiantado nas férias) e anexa o fluxo de caixa
+    # efetivo do ciclo (férias antecipadas + adiantamento quinzenal do mês).
+    vacation = _vacation_events(db, user_id, best)
+
+    series: List[dict] = []
+    for mes in sorted(best):
+        point = {
+            "mes": mes,
+            "gross": round(best[mes]["gross"], 2),
+            "net": round(best[mes]["net"], 2),
+        }
+        if mes in vacation:
+            point.update(vacation[mes])
+        series.append(point)
+    return series
 
 
 # Rubricas de provisão/compensação interna de férias — NÃO são descontos

@@ -577,49 +577,169 @@ function renderAnnualWaterfall(d) {
 
 
 // Gráficos ------------------------------------------------------------
+// Nomes/abreviações dos meses em PT-BR — usados nos rótulos do eixo X.
+const PT_MONTHS_SHORT = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
+const PT_MONTHS_FULL = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"];
+
+function parseYmParts(value) {
+  const m = String(value || "").trim().match(/^(\d{4})-(\d{2})/);
+  if (!m) return null;
+  return { year: parseInt(m[1], 10), monthIndex: parseInt(m[2], 10) - 1 };
+}
+
+// '2026-09' -> 'Set/26' (rótulo compacto do eixo X)
+function monthShortLabel(value) {
+  const p = parseYmParts(value);
+  if (!p) return String(value || "");
+  return PT_MONTHS_SHORT[p.monthIndex] + "/" + String(p.year).slice(2);
+}
+
+// '2026-09' -> 'Setembro/2026' (usado no tooltip, sem perder o ano)
+function monthFullLabel(value) {
+  const p = parseYmParts(value);
+  if (!p) return String(value || "");
+  return PT_MONTHS_FULL[p.monthIndex] + "/" + p.year;
+}
+
+// Render Plotly isolado: um erro num gráfico nunca propaga para a página.
 function renderMonthlyTrend(series) {
   series = Array.isArray(series) ? series : [];
-  const mes = series.map(function (s) { return s.mes; });
-  const gross = series.map(function (s) { return s.gross; });
-  const net = series.map(function (s) { return s.net; });
+  const isMobile = typeof window !== "undefined"
+    && (window.matchMedia ? window.matchMedia("(max-width: 767px)").matches
+      : (window.innerWidth || 0) <= 767);
 
+  // Eixo X em rótulos abreviados (ex.: 'Set/26'); tooltip guarda o ano completo.
+  const xLabels = series.map(function (s) { return monthShortLabel(s.mes); });
+  const gross = series.map(function (s) { return Number(s.gross) || 0; });
+  const net = series.map(function (s) { return Number(s.net) || 0; });
+
+  // Marca os meses do ciclo de férias (FOLHA 'abatida' por adiantamento de férias).
+  const isVacation = series.map(function (s) {
+    return !!(s && s.is_vacation_month === true);
+  });
+
+  // Hover rico para meses de férias: breakdown do fluxo de caixa do ciclo real.
+  function vacationHover(s) {
+    const lines = [
+      "<b>" + monthFullLabel(s.mes) + " 🌴</b>",
+      "Líquido do Holerite: " + formatCurrency(s.net),
+      "Adiantamento Quinzenal: " + formatCurrency(s.month_adiantamento_net),
+      "Férias Antecipadas do Ciclo: " + formatCurrency(s.vacation_net_prepayment),
+      "<b>Fluxo de Caixa Total no Bolso: " + formatCurrency(s.total_effective_cashflow) + "</b>",
+      '<span style="color:#94a3b8;font-size:10px">Líquido reduzido por abate de adiantamento de férias no ciclo</span>',
+    ];
+    return lines.join("<br>");
+  }
+
+  const grossHover = series.map(function (s, i) {
+    if (isVacation[i]) return vacationHover(s);
+    return "<b>" + monthFullLabel(s.mes) + "</b><br>Bruto: " + formatCurrency(s.gross);
+  });
+  const netHover = series.map(function (s, i) {
+    if (isVacation[i]) return vacationHover(s);
+    return "<b>" + monthFullLabel(s.mes) + "</b><br>Líquido: " + formatCurrency(s.net);
+  });
+
+  // Marcador de férias (🌴) acima do ponto da folha abatida no mês do ciclo.
+  const annotations = [];
+  series.forEach(function (s, i) {
+    if (!isVacation[i]) return;
+    annotations.push({
+      x: xLabels[i],
+      y: Math.max(gross[i], net[i]),
+      text: "🌴",
+      xref: "x",
+      yref: "y",
+      showarrow: false,
+      yshift: 8,
+      font: { size: isMobile ? 14 : 18 },
+      clicktoshow: false,
+    });
+  });
+
+  const tickSize = isMobile ? 10 : 11;
   const layout = {
     title: "",
     paper_bgcolor: "rgba(0,0,0,0)",
     plot_bgcolor: "rgba(0,0,0,0)",
-    font: { color: "#e2e8f0" },
-    margin: { t: 40, b: 40, l: 70, r: 70 },
-    legend: { orientation: "h", y: 1.15 },
-    xaxis: { title: "Competência", gridcolor: "#2b3a55", type: "category" },
+    font: { color: "#e2e8f0", size: 12 },
+    annotations: annotations,         // 🌴 marcador nos meses de férias
+    // Margens enxutas no mobile; legenda horizontal compacta no topo.
+    margin: {
+      t: isMobile ? 6 : 10,
+      b: isMobile ? 8 : 30,
+      l: isMobile ? 4 : 8,
+      r: isMobile ? 6 : 16,
+    },
+    legend: {
+      orientation: "h",
+      x: 0.5,
+      y: 1.12,
+      xanchor: "center",
+      yanchor: "bottom",
+      font: { size: tickSize + 1 },
+      itemsizing: "constant",
+    },
+    xaxis: {
+      title: { text: "Competência", font: { size: tickSize } },
+      type: "category",
+      tickangle: -30,               // evita sobreposição dos rótulos
+      tickfont: { size: tickSize },
+      automargin: true,
+      showgrid: false,              // remove as linhas de grade verticais
+      showline: true,
+      linecolor: "#2b3a55",
+      zeroline: false,
+    },
     yaxis: {
-      gridcolor: "#2b3a55",
       tickprefix: "R$ ",
-      tickformat: ",.0f",
+      tickformat: "~s",             // valores compactos: R$ 15k
+      tickfont: { size: tickSize },
+      automargin: true,
+      gridcolor: "rgba(59,130,246,0.10)",
+      showline: false,
+      zeroline: false,
+    },
+    hovermode: "closest",
+    hoverlabel: {
+      bgcolor: "#0f172a",
+      bordercolor: "#2b3a55",
+      font: { color: "#e2e8f0", size: tickSize + 1 },
     },
   };
 
+  // Spline suave (largura 3) com marcadores — melhor clareza por toque.
   const traces = [
     {
-      x: mes,
-      y: gross,
-      name: "Bruto",
       type: "scatter",
       mode: "lines+markers",
-      line: { color: "#3b82f6", width: 3 },
+      x: xLabels,
+      y: gross,
+      name: "Bruto",
+      text: grossHover,
+      hovertemplate: "%{text}<extra></extra>",
+      line: { shape: "spline", width: 3, smoothing: 1.3, color: "#3b82f6" },
+      marker: { size: isMobile ? 5 : 7, color: "#3b82f6", line: { color: "#0f172a", width: 1 } },
       connectgaps: false,
     },
     {
-      x: mes,
-      y: net,
-      name: "Líquido",
       type: "scatter",
       mode: "lines+markers",
-      line: { color: "#22c55e", width: 3 },
+      x: xLabels,
+      y: net,
+      name: "Líquido",
+      text: netHover,
+      hovertemplate: "%{text}<extra></extra>",
+      line: { shape: "spline", width: 3, smoothing: 1.3, color: "#22c55e" },
+      marker: { size: isMobile ? 5 : 7, color: "#22c55e", line: { color: "#0f172a", width: 1 } },
       connectgaps: false,
     },
   ];
 
-  plotChart("monthly-trend-chart", traces, layout, { responsive: true });
+  plotChart("monthly-trend-chart", traces, layout, {
+    responsive: true,                 // redimensiona desktop <-> mobile
+    displayModeBar: isMobile ? false : true,  // modebar oculto no mobile
+  });
 }
 
 function renderDeductions(items) {

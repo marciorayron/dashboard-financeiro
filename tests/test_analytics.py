@@ -945,3 +945,130 @@ def test_single_month_filter_2026_05_overtime_net_not_collapsed(
     assert data["overtime"]["net"] <= extra_gross
     assert data["overtime"]["net"] > extra_gross * 0.5   # 185+ de 200; nunca ~15% do bruto
 
+
+# ---------------------------------------------------------------------
+# Série temporal mensal (Renda Líquida x Bruta) — estrito FOLHA_MENSAL
+# ---------------------------------------------------------------------
+def test_get_monthly_series_excludes_advances_and_non_monthly(db, register_user, login):
+    """ADIANTAMENTO/PPR/13º/férias NÃO inflam o bruto da série mensal.
+
+    Para 2026-09 com uma FOLHA_MENSAL (bruto 15.890,03 / líquido 9.899,19),
+    um ADIANTAMENTO (bruto 1.976,48) e uma segunda FOLHA_MENSAL de MENOR
+    bruto (deve ser deduplicada), o gráfico retorna APENAS o documento
+    FOLHA_MENSAL vencedor: gross == 15890.03 e net == 9899.19 — sem somar o
+    adiantamento e sem misturar o líquido da folha perdedora.
+    """
+    import json as _json
+
+    from models.user import get_user_by_email
+
+    email = "monthly_folha_only@example.com"
+    register_user(email=email)
+    login(email=email)
+    uid = get_user_by_email(db, email).id
+
+    def _insert(doc_type, gross, net, mes="2026-09"):
+        totals = _json.dumps(
+            {
+                "base_salary": gross,
+                "total_earnings": gross,
+                "total_deductions": round(max(gross - net, 0.0), 2),
+                "net_value": net,
+            }
+        )
+        db.execute(
+            "INSERT INTO holerites "
+            "(user_id, company_name, mes_referencia, tipo_documento, totals) "
+            "VALUES (?, 'Empresa', ?, ?, ?)",
+            [uid, mes, doc_type, totals],
+        )
+
+    # FOLHA_MENSAL vencedora (maior bruto) do mês.
+    _insert("FOLHA_MENSAL", 15890.03, 9899.19)
+    # Segunda FOLHA_MENSAL (menor bruto) — deve ser DEDUPLICADA; seu net NÃO
+    # pode contaminar o líquido (o vencedor é decidido por bruto).
+    _insert("FOLHA_MENSAL", 8000.00, 6000.00)
+    # ADIANTAMENTO no mesmo mês — NUNCA deve entrar no bruto.
+    _insert("ADIANTAMENTO", 1976.48, 1307.03)
+    # Competência SÓ com férias (sem FOLHA_MENSAL) — deve ser OMITIDA do eixo.
+    _insert("FERIAS", 5000.00, 4200.00, mes="2026-08")
+    db.commit()
+
+    series = a.get_monthly_series(uid)
+
+    assert len(series) == 1, series
+    point = series[0]
+    assert point["mes"] == "2026-09"
+    assert point["gross"] == pytest.approx(15890.03, abs=1e-2)
+    assert point["net"] == pytest.approx(9899.19, abs=1e-2)
+
+
+# ---------------------------------------------------------------------
+# Contexto de férias na série mensal (ciclo real — folha abatida)
+# ---------------------------------------------------------------------
+def test_get_monthly_series_vacation_event_metadata(db, register_user, login):
+    """Marca o mês da FOLHA 'abatida' por férias e anexa o fluxo de caixa real.
+
+    No ciclo real, o salário é adiantado no FERIAS (crédito em 2026-04) e a
+    FOLHA de retorno (2026-05) sai com o líquido reduzido (575,73). O metadata
+    deve somar: FOLHA net (575,73) + ADIANTAMENTO net (1.287,70) + FÉRIAS net
+    (5.726,99) = 7.590,42. Meses normais permanecem SEM chaves extras.
+    """
+    import json as _json
+
+    from models.user import get_user_by_email
+
+    email = "vacation_cycle@example.com"
+    register_user(email=email)
+    login(email=email)
+    uid = get_user_by_email(db, email).id
+
+    def _insert(doc_type, mes, gross, net, company="Empresa"):
+        totals = _json.dumps(
+            {
+                "base_salary": gross,
+                "total_earnings": gross,
+                "total_deductions": round(max(gross - net, 0.0), 2),
+                "net_value": net,
+            }
+        )
+        db.execute(
+            "INSERT INTO holerites "
+            "(user_id, company_name, mes_referencia, tipo_documento, totals) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [uid, company, mes, doc_type, totals],
+        )
+
+    # Meses normais de referência (linha de base p/ a mediana).
+    _insert("FOLHA_MENSAL", "2026-03", 5000.0, 3500.0)
+    _insert("FOLHA_MENSAL", "2026-04", 5000.0, 3500.0)   # mês do crédito FERIAS
+    _insert("FOLHA_MENSAL", "2026-06", 5700.0, 4000.0)
+    # Crédito FERIAS (adiantamento de férias) recebido em 2026-04.
+    _insert("FERIAS", "2026-04", 6051.27, 5726.99)
+    # Mês de retorno: FOLHA abatida (líquido reduzido) + ADIANTAMENTO quinzenal.
+    _insert("FOLHA_MENSAL", "2026-05", 9536.12, 575.73)
+    _insert("ADIANTAMENTO", "2026-05", 1635.04, 1287.70)
+    db.commit()
+
+    series = a.get_monthly_series(uid)
+    by_mes = {p["mes"]: p for p in series}
+
+    # Meses esperados na série (só com FOLHA_MENSAL).
+    assert sorted(by_mes.keys()) == ["2026-03", "2026-04", "2026-05", "2026-06"]
+
+    # (1) Mês da folha abatida é o ÚNICO marcado como mês de férias.
+    vac = by_mes["2026-05"]
+    assert vac["is_vacation_month"] is True
+    assert vac["gross"] == pytest.approx(9536.12, abs=1e-2)
+    assert vac["net"] == pytest.approx(575.73, abs=1e-2)
+    assert vac["vacation_net_prepayment"] == pytest.approx(5726.99, abs=1e-2)
+    assert vac["month_adiantamento_net"] == pytest.approx(1287.70, abs=1e-2)
+    assert vac["total_effective_cashflow"] == pytest.approx(7590.42, abs=1e-2)
+
+    # (2) Meses normais permanecem INALTERADOS (sem chaves de metadata).
+    for mes in ("2026-03", "2026-04", "2026-06"):
+        point = by_mes[mes]
+        assert "is_vacation_month" not in point
+        assert "vacation_net_prepayment" not in point
+        assert "total_effective_cashflow" not in point
+
