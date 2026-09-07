@@ -103,7 +103,11 @@ def _apply_migrations(conn):
       * `ai_usage_logs`       -> log de consumo de IA (rate limiting).
     """
     # Importa no corpo para evitar ciclos de import com models.
-    from models.user import ensure_user_plan_column, ensure_user_role_column
+    from models.user import (
+        ensure_user_plan_column,
+        ensure_user_profile_completed_column,
+        ensure_user_role_column,
+    )
     from models.profile import create_user_profile_history_table
     from services.settings_service import ensure_settings_table
     from services.monitoring_service import ensure_parse_errors_table
@@ -114,6 +118,7 @@ def _apply_migrations(conn):
 
     ensure_user_role_column(conn)
     ensure_user_plan_column(conn)
+    ensure_user_profile_completed_column(conn)
     create_user_profile_history_table(conn)
     ensure_settings_table(conn)
     ensure_parse_errors_table(conn)

@@ -69,7 +69,8 @@ def seed_default_admin(db, force: bool = False) -> dict:
         db.execute(
             f"""
             UPDATE {USER_TABLE}
-            SET role = ?, password_hash = ?, is_active = 1, updated_at = datetime('now')
+            SET role = ?, password_hash = ?, is_active = 1,
+                profile_completed = 1, updated_at = datetime('now')
             WHERE email = ?
             """,
             [ROLE_ADMIN, password_hash, email],
@@ -77,8 +78,9 @@ def seed_default_admin(db, force: bool = False) -> dict:
     else:
         db.execute(
             f"""
-            INSERT INTO {USER_TABLE} (name, email, password_hash, role, is_active)
-            VALUES (?, ?, ?, ?, 1)
+            INSERT INTO {USER_TABLE}
+                (name, email, password_hash, role, is_active, profile_completed)
+            VALUES (?, ?, ?, ?, 1, 1)
             """,
             [DEFAULT_ADMIN_NAME, email, password_hash, ROLE_ADMIN],
         )

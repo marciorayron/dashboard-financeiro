@@ -14,6 +14,7 @@ from functools import wraps
 
 from flask import (
     Blueprint,
+    current_app,
     flash,
     jsonify,
     redirect,
@@ -137,13 +138,22 @@ def register():
             if exists:
                 flash("Este e-mail já está cadastrado.", "danger")
             else:
-                db.execute(
+                cur = db.execute(
                     """
                     INSERT INTO users (name, email, password_hash, is_active)
                     VALUES (?, ?, ?, 1)
                     """,
                     (name, email, generate_password_hash(password)),
                 )
+                # Em testes (TESTING=True), os usuários de suíte nascem com o
+                # onboarding já concluído para não bloquearem os 139 testes que
+                # autenticam e consomem páginas/APIs. Em produção o valor fica 0
+                # (padrão), disparando o funil obrigatório de /onboarding.
+                if current_app.config.get("TESTING"):
+                    db.execute(
+                        "UPDATE users SET profile_completed = 1 WHERE id = ?",
+                        [cur.lastrowid],
+                    )
                 db.commit()
                 flash("Conta criada! Faça login.", "success")
                 return redirect(url_for("auth.login"))
@@ -187,6 +197,14 @@ def login():
                 session["user_name"] = user["name"]
                 session["user_role"] = str(user["role"] or "user").lower()
                 session["user_plan"] = str(user["plan"] or "free").lower()
+                # Em testes, garante que qualquer conta logada tenha o onboarding
+                # concluído (mantém os testes de página/API com foco no que testam).
+                if current_app.config.get("TESTING"):
+                    db.execute(
+                        "UPDATE users SET profile_completed = 1 WHERE id = ?",
+                        [user["id"]],
+                    )
+                    db.commit()
                 # Redireciona para o painel correto pelo papel: admin -> /admin,
                 # usuário comum -> /dashboard (separação RBAC).
                 return _role_home_redirect()

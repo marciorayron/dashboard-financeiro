@@ -22,11 +22,86 @@ import warnings
 # funcionamento) — é apenas um aviso de biblioteca em Python 3.13+.
 warnings.filterwarnings("ignore", message="ARC4 has been moved")
 
-from flask import Flask
+from flask import (
+    Flask,
+    flash,
+    jsonify,
+    redirect,
+    request,
+    session,
+)
 
 from config import get_config
 from database.connection import close_db, init_db
 from routes import register_blueprints
+
+
+# ---------------------------------------------------------------------
+# Onboarding obrigatório (guard global)
+# ---------------------------------------------------------------------
+# Rotas liberadas mesmo com o perfil incompleto (login/logout/onboarding,
+# o endpoint de perfil usado pelo funil e assets estáticos).
+_ONBOARDING_EXEMPT_PATHS = frozenset(
+    {"/onboarding", "/api/profile", "/register", "/login", "/logout"}
+)
+_ONBOARDING_EXEMPT_PREFIXES = ("/static/", "/auth/",)
+
+
+def _onboarding_allowed(path: str) -> bool:
+    """True quando a rota pode ser acessada com o perfil ainda incompleto."""
+    if path in _ONBOARDING_EXEMPT_PATHS:
+        return True
+    return any(path.startswith(p) for p in _ONBOARDING_EXEMPT_PREFIXES)
+
+
+def _onboarding_wants_json() -> bool:
+    """True quando o cliente prefere resposta JSON (APIs)."""
+    best = request.accept_mimetypes.best or ""
+    return request.is_json or ("json" in best)
+
+
+def _enforce_onboarding():
+    """Force redirect/block enquanto `users.profile_completed` for falso.
+
+    Um usuário autenticado com o perfil incompleto só pode acessar as rotas
+    da whitelist (`/onboarding`, `/api/profile`, `/register`, `/login`,
+    `/logout`, `/static/*` e `/auth/*`). Páginas são redirecionadas para
+    `/onboarding`; chamadas de API recebem HTTP 403 `ONBOARDING_REQUIRED`.
+    """
+    user_id = session.get("user_id")
+    if user_id is None:
+        return None
+    if _onboarding_allowed(request.path):
+        return None
+
+    from models.user import get_user  # import local evita ciclo
+
+    try:
+        user = get_user(get_db_conn(), user_id)
+    except Exception:  # noqa: BLE001 - nunca deixar o guard quebrar o app
+        user = None
+    if user is not None and not getattr(user, "profile_completed", True):
+        api_like = request.path.startswith("/api/") or request.path.startswith("/admin/api/")
+        if api_like or _onboarding_wants_json():
+            return (
+                jsonify(
+                    {
+                        "error": "Perfil não configurado. Complete o onboarding.",
+                        "code": "ONBOARDING_REQUIRED",
+                    }
+                ),
+                403,
+            )
+        flash("Complete seu perfil para acessar o dashboard.", "warning")
+        return redirect("/onboarding")
+    return None
+
+
+def get_db_conn():
+    """Conexão SQLite do contexto atual (compat com o guard)."""
+    from database.connection import get_db
+
+    return get_db()
 
 
 def create_app(env: str = None) -> Flask:
@@ -100,6 +175,9 @@ def create_app(env: str = None) -> Flask:
 
     # 6) Registra os blueprints.
     register_blueprints(app)
+
+    # 6.1) Guard global de onboarding (redireciona/bloqueia perfis incompletos).
+    app.before_request(_enforce_onboarding)
 
     # 7) Comando CLI: criar/recriar o administrador padrão (RBAC).
     _register_seed_admin_cli(app)

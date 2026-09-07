@@ -209,6 +209,19 @@ body {
   min-height: 340px;
 }
 
+/* Canvas dos gráficos Chart.js preenche o container (responsive + autosize). */
+.chart-fill {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* Modo privacidade: gráficos desfocados (tooltips/data labels ficam ilegíveis). */
+body.privacy-mode canvas.chart-fill {
+  filter: blur(14px) saturate(0.35);
+  transition: filter 0.2s ease;
+}
+
 /* =====================================================================
    Tabelas
    ===================================================================== */

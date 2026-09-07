@@ -30,7 +30,7 @@ lido sempre da sessão autenticada (nunca de parâmetros do cliente).
 ```
                         ┌─────────────────────────────┐
    Navegador (Bootstrap)│  Blueprints (routes/)       │
-   Plotly / admin.js    │  main · auth · api · profile│
+   Chart.js / admin.js    │  main · auth · api · profile│
                         │  reports · admin            │
                         └──────────┬──────────────────┘
                                    │
@@ -46,7 +46,7 @@ lido sempre da sessão autenticada (nunca de parâmetros do cliente).
 **Fluxo de dados:** o PDF é enviado → texto extraído (pypdf/pdfplumber) →
 parsing universal via DeepSeek com fallback local → persistência em `holerites`
 + `rubricas_holerite` → agregações em `analytics_service` → renderização no
-dashboard (Plotly) ou exportação (`/api/export`).
+dashboard (Chart.js) ou exportação (`/api/export`).
 
 O projeto também possui **histórico de revisão de perfil**
 (`user_profile_history`) que permite ao analytics resolver a **taxa de
@@ -67,7 +67,7 @@ Por fim, o projeto implementa os **direitos do titular previstos na LGPD
 |---------------|---------------------------------------------------|
 | Backend       | Python 3.12+, Flask 3, Blueprints                  |
 | Banco de dados| SQLite (WAL, anti-locking) + `schema.sql`          |
-| Frontend      | Bootstrap 5, JavaScript puro, Plotly.js            |
+| Frontend      | Bootstrap 5, JavaScript puro, Chart.js            |
 | PDFs          | pypdf, pdfplumber (extração), ReportLab (dossiê)   |
 | IA (opcional) | DeepSeek API para parsing universal                |
 | Exportação    | pandas + openpyxl (XLSX) / CSV                     |

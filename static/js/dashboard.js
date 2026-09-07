@@ -1,7 +1,7 @@
 /* =====================================================================
    dashboard.js
    Dashboard Financeiro Pessoal — Tema Escuro
-   Lógica de frontend: upload com progresso, KPIs, gráficos Plotly,
+   Lógica de frontend: upload com progresso, KPIs, gráficos Chart.js,
    histórico com detalhe e exclusão. Autenticação por sessão.
    ===================================================================== */
 
@@ -310,7 +310,9 @@ function exportSpreadsheet() {
 // Helpers de null-safety -------------------------------------------------
 function safeText(id, value) {
   const el = document.getElementById(id);
-  if (el && value !== undefined && value !== null) el.textContent = value;
+  if (el && value !== undefined && value !== null) {
+    el.textContent = privacyActive ? privacyMaskText(value) : value;
+  }
 }
 function safeRender(fn) {
   try { fn(); } catch (err) { console.error("render error:", err); }
@@ -318,15 +320,230 @@ function safeRender(fn) {
 
 
 
-// Render Plotly isolado: um erro num gráfico nunca propaga para a página.
-function plotChart(target, data, layout, opts) {
-  const el = typeof target === "string" ? document.getElementById(target) : target;
-  if (!el) { console.error("plotChart: elemento não encontrado:", target); return; }
-  try {
-    Plotly.newPlot(el, data, layout || {}, opts || {});
-  } catch (err) {
-    console.error("plotChart error:", err);
+// ---- Chart.js -----------------------------------------------------
+// Registry p/ destruir a instância anterior antes de recriar em um canvas.
+const chartRegistry = {};
+
+function isMobileViewport() {
+  return typeof window !== "undefined"
+    && (window.matchMedia ? window.matchMedia("(max-width: 767px)").matches
+      : (window.innerWidth || 0) <= 767);
+}
+
+function getChartCanvas(id) {
+  return document.getElementById(id);
+}
+
+function destroyChart(id) {
+  const inst = chartRegistry[id];
+  if (inst) {
+    try { inst.destroy(); } catch (err) { /* noop */ }
+    delete chartRegistry[id];
   }
+}
+
+// Cria (ou recria) um gráfico Chart.js sobre um canvas, destruindo o anterior.
+function mountChart(id, config) {
+  const canvas = typeof id === "string" ? getChartCanvas(id) : id;
+  if (!canvas) { console.error("Chart.js: canvas não encontrado:", id); return null; }
+  destroyChart(id);
+  try {
+    const ctx = canvas.getContext && canvas.getContext("2d");
+    if (!ctx) { console.error("Chart.js: canvas sem contexto 2d:", id); return null; }
+    const chart = new Chart(ctx, config);
+    chartRegistry[id] = chart;
+    return chart;
+  } catch (err) {
+    console.error("Chart.js mount error:", err);
+    return null;
+  }
+}
+
+// Eixo em moeda compacta: R$ 15k / R$ 1,5M.
+function chartAxisMoney(value) {
+  const v = Number(value) || 0;
+  const abs = Math.abs(v);
+  if (abs >= 1e6) {
+    return "R$ " + (v / 1e6).toLocaleString("pt-BR", { maximumFractionDigits: 1 }) + "M";
+  }
+  if (abs >= 1e3) {
+    return "R$ " + (v / 1e3).toLocaleString("pt-BR", { maximumFractionDigits: 1 }) + "k";
+  }
+  return "R$ " + Math.round(v).toLocaleString("pt-BR");
+}
+
+// Opções de tooltip padrão (dark, limpo e legível no toque).
+function chartTooltip(opts) {
+  return Object.assign(
+    {
+      backgroundColor: "#0f172a",
+      titleColor: "#f1f5f9",
+      bodyColor: "#cbd5e1",
+      borderColor: "#2b3a55",
+      borderWidth: 1,
+      padding: 10,
+      displayColors: false,
+      usePointStyle: true,
+      titleFont: { weight: "600" },
+    },
+    opts || {}
+  );
+}
+
+// Gradiente de preenchimento sob uma linha (transparente -> cor no topo).
+function lineAreaGradient(rgbaTop) {
+  return function (context) {
+    const chart = context.chart;
+    const area = chart.chartArea;
+    if (!area) return rgbaTop;
+    const g = chart.ctx.createLinearGradient(0, area.top, 0, area.bottom);
+    g.addColorStop(0, rgbaTop);
+    g.addColorStop(1, "rgba(0,0,0,0)");
+    return g;
+  };
+}
+
+// Tema padrão escuro do Chart.js (consistente com o dashboard).
+if (typeof Chart !== "undefined") {
+  Chart.defaults.color = "#cbd5e1";
+  Chart.defaults.font.family =
+    "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif";
+  Chart.defaults.borderColor = "rgba(148,163,184,0.14)";
+  Chart.defaults.plugins.legend.labels.usePointStyle = true;
+  Chart.defaults.plugins.legend.labels.boxWidth = 8;
+  Chart.defaults.plugins.legend.labels.boxHeight = 8;
+  Chart.defaults.plugins.legend.labels.padding = 14;
+  Chart.defaults.plugins.legend.labels.font = { size: 12 };
+}
+
+// Plugin global: desenha o marcador de férias (🌴) sobre o ponto da série.
+const vacationMarkersPlugin = {
+  id: "vacationMarkers",
+  afterDatasetsDraw: function (chart) {
+    const cfg = (chart.config.options.plugins && chart.config.options.plugins.vacationMarkers) || {};
+    const indexes = cfg.indexes;
+    if (!indexes) return;
+    const meta = chart.getDatasetMeta(0);
+    if (!meta || !meta.data) return;
+    const ctx = chart.ctx;
+    ctx.save();
+    ctx.textAlign = "center";
+    ctx.textBaseline = "bottom";
+    ctx.font = (isMobileViewport() ? 15 : 18) + "px sans-serif";
+    for (let i = 0; i < (chart.data.labels || []).length; i++) {
+      if (!indexes[i]) continue;
+      const pt = meta.data[i];
+      if (!pt) continue;
+      ctx.fillText("\u{1F334}", pt.x, (pt.y || 0) - 10);
+    }
+    ctx.restore();
+  },
+};
+if (typeof Chart !== "undefined") {
+  Chart.register(vacationMarkersPlugin);
+}
+
+// ---- Data labels (chartjs-plugin-datalabels) & Controles globais -----
+let dataLabelsOn = true;      // rótulos de dados visíveis (toggle "🏷️ Rótulos")
+let privacyActive = false;    // modo privacidade (máscara R$ ****)
+
+// Registra o plugin de data labels (exposto como ChartDataLabels no UMD).
+if (typeof Chart !== "undefined" && typeof ChartDataLabels !== "undefined") {
+  Chart.register(ChartDataLabels);
+}
+
+// Redesenha todos os gráficos ativos (usado após trocar o estado de rótulos).
+function refreshAllCharts() {
+  Object.keys(chartRegistry).forEach(function (id) {
+    const chart = chartRegistry[id];
+    if (chart) {
+      try { chart.update(); } catch (err) { /* noop */ }
+    }
+  });
+}
+
+// Texto mascarado por padrão de privacidade.
+function privacyMaskText(text) {
+  const t = String(text == null ? "" : text).trim();
+  if (/R\$\s?[\d.,]+/.test(t)) return "R$ ****";
+  if (/^[-+]?[\d][\d.,]*$/.test(t)) return "****";
+  return String(text);
+}
+
+// 👁️ Visibilidade: mascara/esfumaça números em cards e gráficos.
+function setPrivacy(on) {
+  privacyActive = !!on;
+  document.body.classList.toggle("privacy-mode", privacyActive);
+  const all = document.querySelectorAll("body *");
+  for (let i = 0; i < all.length; i++) {
+    const el = all[i];
+    if (el.children && el.children.length) continue;
+    const tag = el.tagName;
+    if (/^(SCRIPT|STYLE|CANVAS|INPUT|TEXTAREA|BUTTON|SELECT|OPTION|A)$/.test(tag)) continue;
+    const raw = (el.textContent || "").trim();
+    if (!raw) continue;
+    if (!/R\$\s?[\d.,]+/.test(raw) && !/^[-+]?[\d][\d.,]*$/.test(raw)) continue;
+    if (privacyActive) {
+      if (el.dataset.privacyOrigin === undefined) el.dataset.privacyOrigin = el.textContent;
+      el.textContent = privacyMaskText(el.dataset.privacyOrigin);
+    } else if (el.dataset.privacyOrigin !== undefined) {
+      el.textContent = el.dataset.privacyOrigin;
+      delete el.dataset.privacyOrigin;
+    }
+  }
+  const btn = document.getElementById("privacyToggle");
+  if (btn) {
+    btn.classList.toggle("active", privacyActive);
+    btn.classList.toggle("btn-outline-light", !privacyActive);
+    btn.classList.toggle("btn-outline-warning", privacyActive);
+    btn.setAttribute("aria-pressed", String(privacyActive));
+    const ic = btn.querySelector("i");
+    if (ic) ic.className = privacyActive ? "bi bi-eye me-1" : "bi bi-eye-slash me-1";
+  }
+  const hint = document.getElementById("viewHint");
+  if (hint) {
+    hint.textContent = privacyActive
+      ? "Modo privacidade ativo — valores mascarados e gráficos desfocados."
+      : "";
+  }
+}
+
+// 🏷️ Rótulos: alterna a visibilidade dos data labels (chart.update()).
+function setLabelsVisible(on) {
+  dataLabelsOn = !!on;
+  const btn = document.getElementById("labelsToggle");
+  if (btn) {
+    btn.classList.toggle("active", dataLabelsOn);
+    btn.classList.toggle("btn-outline-info", dataLabelsOn);
+    btn.classList.toggle("btn-outline-secondary", !dataLabelsOn);
+    btn.setAttribute("aria-pressed", String(dataLabelsOn));
+    const st = btn.querySelector(".lbl-state");
+    if (st) {
+      st.textContent = dataLabelsOn ? "ON" : "OFF";
+      st.classList.toggle("text-bg-info", dataLabelsOn);
+      st.classList.toggle("text-bg-secondary", !dataLabelsOn);
+    }
+  }
+  const hint = document.getElementById("viewHint");
+  if (hint && !privacyActive) {
+    hint.textContent = dataLabelsOn ? "" : "Rótulos de dados ocultos nos gráficos.";
+  }
+  refreshAllCharts();
+}
+
+// Liga os controles da barra superior (privacidade & rótulos).
+function initViewToggles() {
+  const privacyBtn = document.getElementById("privacyToggle");
+  if (privacyBtn) {
+    privacyBtn.addEventListener("click", function () { setPrivacy(!privacyActive); });
+  }
+  const labelsBtn = document.getElementById("labelsToggle");
+  if (labelsBtn) {
+    labelsBtn.addEventListener("click", function () { setLabelsVisible(!dataLabelsOn); });
+  }
+  // Estado inicial consistente com a marcação do HTML (rótulos ON, dados visíveis).
+  setLabelsVisible(true);
+  setPrivacy(false);
 }
 // KPIs orientados à decisão -----------------------------------------
 
@@ -537,42 +754,77 @@ function initTaxProjection() {
 
 
 function renderAnnualWaterfall(d) {
-  const el = document.getElementById("annual-projection-chart");
-  if (!el) return;
+  const id = "annual-projection-chart";
+  if (!getChartCanvas(id)) return;
   const baseline = Number(d.baseline_annual) || 0;
   const thirteenth = Number(d.thirteenth && d.thirteenth.net) || 0;
   const vacation = Number(d.vacation_bonus && d.vacation_bonus.net) || 0;
   const ppr = Number(d.ppr_estimate) || 0;
   const total = Number(d.total_annual_take_home) || 0;
 
-  const trace = {
-    type: "waterfall",
-    orientation: "v",
-    measure: ["relative", "relative", "relative", "relative", "total"],
-    x: ["Baseline 12m", "13º Salário", "Férias (1/3)", "PPR/PLR", "Total Anual"],
-    y: [baseline, thirteenth, vacation, ppr, total],
-    connector: { line: { color: "#2b3a55" } },
-    increasing: { marker: { color: "#22c55e" } },
-    decreasing: { marker: { color: "#ef4444" } },
-    totals: { marker: { color: "#3b82f6" } },
-    text: [formatCurrency(baseline), "+" + formatCurrency(thirteenth), "+" + formatCurrency(vacation), "+" + formatCurrency(ppr), formatCurrency(total)],
-    textposition: "outside",
-    cliponaxis: false,
-    hovertemplate: "%{x}<br>R$ %{y:,.2f}<extra></extra>",
-  };
-  const layout = {
-    title: "",
-    paper_bgcolor: "rgba(0,0,0,0)",
-    plot_bgcolor: "rgba(0,0,0,0)",
-    font: { color: "#e2e8f0" },
-    // Padding superior extra para os valores flutuantes (+R$ ...) não serem
-    // cortados pelo topo do canvas.
-    margin: { t: 45, b: 70, l: 70, r: 20 },
-    xaxis: { gridcolor: "#2b3a55", automargin: true },
-    yaxis: { title: "R$", gridcolor: "#2b3a55", automargin: true },
-    showlegend: false,
-  };
-  plotChart(el.id, [trace], layout, { responsive: true, displayModeBar: false });
+  const labels = ["Baseline 12m", "13º Salário", "Férias (1/3)", "PPR/PLR", "Total Anual"];
+  const deltas = [baseline, thirteenth, vacation, ppr, total];
+  // Barras flutuantes [início, fim] — aproximação de waterfall.
+  const floats = [
+    [0, baseline],
+    [baseline, baseline + thirteenth],
+    [baseline + thirteenth, baseline + thirteenth + vacation],
+    [baseline + thirteenth + vacation, baseline + thirteenth + vacation + ppr],
+    [0, total],
+  ];
+  const colors = ["#3b82f6", "#22c55e", "#22c55e", "#22c55e", "#8b5cf6"];
+
+  mountChart(id, {
+    type: "bar",
+    data: {
+      labels: labels,
+      datasets: [{
+        label: "Valor anual",
+        data: floats,
+        backgroundColor: colors,
+        borderColor: colors,
+        borderWidth: 1,
+        borderRadius: 6,
+        barPercentage: 0.55,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        datalabels: {
+          display: function () { return dataLabelsOn; },
+          anchor: "end",
+          align: "end",
+          offset: 4,
+          color: "#e2e8f0",
+          font: { size: 11, weight: "700" },
+          clamp: true,
+          formatter: function (value, ctx) {
+            const delta = deltas[ctx.dataIndex] || 0;
+            return (ctx.dataIndex === 0 ? "" : "+") + formatCurrency(delta);
+          },
+        },
+        tooltip: chartTooltip({
+          callbacks: {
+            label: function (ctx) {
+              const delta = deltas[ctx.dataIndex] || 0;
+              return (ctx.dataIndex === 0 ? "" : "+") + formatCurrency(delta);
+            },
+          },
+        }),
+      },
+      scales: {
+        x: { grid: { display: false }, ticks: { autoSkip: false, maxRotation: 0 } },
+        y: {
+          beginAtZero: true,
+          grid: { color: "rgba(148,163,184,0.08)" },
+          ticks: { callback: chartAxisMoney },
+        },
+      },
+    },
+  });
 }
 
 
@@ -601,144 +853,116 @@ function monthFullLabel(value) {
   return PT_MONTHS_FULL[p.monthIndex] + "/" + p.year;
 }
 
-// Render Plotly isolado: um erro num gráfico nunca propaga para a página.
 function renderMonthlyTrend(series) {
+  const id = "monthly-trend-chart";
+  if (!getChartCanvas(id)) return;
   series = Array.isArray(series) ? series : [];
-  const isMobile = typeof window !== "undefined"
-    && (window.matchMedia ? window.matchMedia("(max-width: 767px)").matches
-      : (window.innerWidth || 0) <= 767);
+  const isMobile = isMobileViewport();
 
-  // Eixo X em rótulos abreviados (ex.: 'Set/26'); tooltip guarda o ano completo.
-  const xLabels = series.map(function (s) { return monthShortLabel(s.mes); });
+  // Rótulos curtos no eixo X; tooltip guarda mês/ano por extenso.
+  const labels = series.map(function (s) { return monthShortLabel(s.mes); });
+  const fullLabels = series.map(function (s) { return monthFullLabel(s.mes); });
   const gross = series.map(function (s) { return Number(s.gross) || 0; });
   const net = series.map(function (s) { return Number(s.net) || 0; });
+  const isVacation = series.map(function (s) { return !!(s && s.is_vacation_month === true); });
 
-  // Marca os meses do ciclo de férias (FOLHA 'abatida' por adiantamento de férias).
-  const isVacation = series.map(function (s) {
-    return !!(s && s.is_vacation_month === true);
-  });
-
-  // Hover rico para meses de férias: breakdown do fluxo de caixa do ciclo real.
-  function vacationHover(s) {
-    const lines = [
-      "<b>" + monthFullLabel(s.mes) + " 🌴</b>",
-      "Líquido do Holerite: " + formatCurrency(s.net),
-      "Adiantamento Quinzenal: " + formatCurrency(s.month_adiantamento_net),
-      "Férias Antecipadas do Ciclo: " + formatCurrency(s.vacation_net_prepayment),
-      "<b>Fluxo de Caixa Total no Bolso: " + formatCurrency(s.total_effective_cashflow) + "</b>",
-      '<span style="color:#94a3b8;font-size:10px">Líquido reduzido por abate de adiantamento de férias no ciclo</span>',
-    ];
-    return lines.join("<br>");
+  // Dataset de linha: curva suave (tension), gradiente sob a linha e pontos
+  // arredondados — legível no desktop e no toque mobile.
+  function lineDataset(label, color, colorFill, data) {
+    return {
+      label: label,
+      data: data,
+      borderColor: color,
+      backgroundColor: lineAreaGradient(colorFill),
+      fill: true,
+      tension: 0.4,
+      borderWidth: 3,
+      pointRadius: isMobile ? 4 : 5,
+      pointHoverRadius: isMobile ? 7 : 8,
+      pointBackgroundColor: color,
+      pointBorderColor: "#0f172a",
+      pointBorderWidth: 1,
+      pointHoverBackgroundColor: color,
+      pointHoverBorderColor: "#0f172a",
+    };
   }
 
-  const grossHover = series.map(function (s, i) {
-    if (isVacation[i]) return vacationHover(s);
-    return "<b>" + monthFullLabel(s.mes) + "</b><br>Bruto: " + formatCurrency(s.gross);
-  });
-  const netHover = series.map(function (s, i) {
-    if (isVacation[i]) return vacationHover(s);
-    return "<b>" + monthFullLabel(s.mes) + "</b><br>Líquido: " + formatCurrency(s.net);
-  });
-
-  // Marcador de férias (🌴) acima do ponto da folha abatida no mês do ciclo.
-  const annotations = [];
-  series.forEach(function (s, i) {
-    if (!isVacation[i]) return;
-    annotations.push({
-      x: xLabels[i],
-      y: Math.max(gross[i], net[i]),
-      text: "🌴",
-      xref: "x",
-      yref: "y",
-      showarrow: false,
-      yshift: 8,
-      font: { size: isMobile ? 14 : 18 },
-      clicktoshow: false,
-    });
-  });
-
-  const tickSize = isMobile ? 10 : 11;
-  const layout = {
-    title: "",
-    paper_bgcolor: "rgba(0,0,0,0)",
-    plot_bgcolor: "rgba(0,0,0,0)",
-    font: { color: "#e2e8f0", size: 12 },
-    annotations: annotations,         // 🌴 marcador nos meses de férias
-    // Margens enxutas no mobile; legenda horizontal compacta no topo.
-    margin: {
-      t: isMobile ? 6 : 10,
-      b: isMobile ? 8 : 30,
-      l: isMobile ? 4 : 8,
-      r: isMobile ? 6 : 16,
+  mountChart(id, {
+    type: "line",
+    data: {
+      labels: labels,
+      datasets: [
+        lineDataset("Bruto", "#3b82f6", "rgba(59,130,246,0.35)", gross),
+        lineDataset("Líquido", "#22c55e", "rgba(34,197,94,0.30)", net),
+      ],
     },
-    legend: {
-      orientation: "h",
-      x: 0.5,
-      y: 1.12,
-      xanchor: "center",
-      yanchor: "bottom",
-      font: { size: tickSize + 1 },
-      itemsizing: "constant",
+    options: {
+      responsive: true,              // redimensiona desktop <-> mobile
+      maintainAspectRatio: false,
+      interaction: { mode: "nearest", intersect: false },
+      plugins: {
+        legend: {
+          position: "top",
+          align: isMobile ? "center" : "end",
+          labels: { color: "#e2e8f0", boxWidth: 10, padding: 12 },
+        },
+        vacationMarkers: { indexes: isVacation },   // 🌴 marcador de férias
+        datalabels: {
+          display: function () { return dataLabelsOn; },
+          color: "#94a3b8",
+          anchor: "center",
+          align: "top",
+          offset: 6,
+          font: { size: 10, weight: "600" },
+          clamp: true,
+          formatter: function (value) { return chartAxisMoney(value); },
+        },
+        tooltip: chartTooltip({
+          intersect: false,
+          displayColors: true,
+          callbacks: {
+            title: function (items) {
+              const i = items.length ? items[0].dataIndex : 0;
+              return fullLabels[i] + (isVacation[i] ? " \u{1F334}" : "");
+            },
+            label: function (ctx) {
+              const v = Number(ctx.parsed.y) || 0;
+              return ctx.dataset.label + ": " + formatCurrency(v);
+            },
+            afterBody: function (items) {
+              const i = items.length ? items[0].dataIndex : -1;
+              if (i < 0 || !isVacation[i]) return [];
+              const s = series[i];
+              return [
+                "Líquido do Holerite: " + formatCurrency(s.net),
+                "Adiantamento Quinzenal: " + formatCurrency(s.month_adiantamento_net),
+                "Férias Antecipadas do Ciclo: " + formatCurrency(s.vacation_net_prepayment),
+                "",
+                "Fluxo de Caixa Total no Bolso: " + formatCurrency(s.total_effective_cashflow),
+                "Líquido reduzido por abate de adiantamento de férias no ciclo",
+              ];
+            },
+          },
+        }),
+      },
+      scales: {
+        x: {
+          grid: { display: false },
+          ticks: {
+            maxRotation: 0,
+            minRotation: 0,
+            autoSkip: true,
+            autoSkipPadding: 24,
+            color: "#94a3b8",
+          },
+        },
+        y: {
+          beginAtZero: true,
+          grid: { color: "rgba(148,163,184,0.10)" },
+          ticks: { callback: chartAxisMoney, color: "#94a3b8" },
+        },
+      },
     },
-    xaxis: {
-      title: { text: "Competência", font: { size: tickSize } },
-      type: "category",
-      tickangle: -30,               // evita sobreposição dos rótulos
-      tickfont: { size: tickSize },
-      automargin: true,
-      showgrid: false,              // remove as linhas de grade verticais
-      showline: true,
-      linecolor: "#2b3a55",
-      zeroline: false,
-    },
-    yaxis: {
-      tickprefix: "R$ ",
-      tickformat: "~s",             // valores compactos: R$ 15k
-      tickfont: { size: tickSize },
-      automargin: true,
-      gridcolor: "rgba(59,130,246,0.10)",
-      showline: false,
-      zeroline: false,
-    },
-    hovermode: "closest",
-    hoverlabel: {
-      bgcolor: "#0f172a",
-      bordercolor: "#2b3a55",
-      font: { color: "#e2e8f0", size: tickSize + 1 },
-    },
-  };
-
-  // Spline suave (largura 3) com marcadores — melhor clareza por toque.
-  const traces = [
-    {
-      type: "scatter",
-      mode: "lines+markers",
-      x: xLabels,
-      y: gross,
-      name: "Bruto",
-      text: grossHover,
-      hovertemplate: "%{text}<extra></extra>",
-      line: { shape: "spline", width: 3, smoothing: 1.3, color: "#3b82f6" },
-      marker: { size: isMobile ? 5 : 7, color: "#3b82f6", line: { color: "#0f172a", width: 1 } },
-      connectgaps: false,
-    },
-    {
-      type: "scatter",
-      mode: "lines+markers",
-      x: xLabels,
-      y: net,
-      name: "Líquido",
-      text: netHover,
-      hovertemplate: "%{text}<extra></extra>",
-      line: { shape: "spline", width: 3, smoothing: 1.3, color: "#22c55e" },
-      marker: { size: isMobile ? 5 : 7, color: "#22c55e", line: { color: "#0f172a", width: 1 } },
-      connectgaps: false,
-    },
-  ];
-
-  plotChart("monthly-trend-chart", traces, layout, {
-    responsive: true,                 // redimensiona desktop <-> mobile
-    displayModeBar: isMobile ? false : true,  // modebar oculto no mobile
   });
 }
 
@@ -775,39 +999,56 @@ function renderDeductions(items) {
 
   const labels = shown.map(function (i) { return i.descricao; });
   const values = shown.map(function (i) { return Number(i.total || 0); });
-  const pcts = values.map(function (v) { return total ? (v / total * 100) : 0; });
 
-  const trace = {
-    x: values,
-    y: labels,
+  mountChart("deductions-breakdown-chart", {
     type: "bar",
-    orientation: "h",
-    marker: { color: "#ef4444" },
-    customdata: pcts,
-    // Rótulos exatos (moeda) desenhados à direita de cada barra horizontal.
-    text: values.map(function (v) { return formatCurrency(v); }),
-    textposition: "outside",
-    cliponaxis: false,
-    hovertemplate: "%{y}<br>%{customdata:.1f}% do total de descontos<br>R$ %{x:,.2f}<extra></extra>",
-  };
-
-  const layout = {
-    title: "",
-    paper_bgcolor: "rgba(0,0,0,0)",
-    plot_bgcolor: "rgba(0,0,0,0)",
-    font: { color: "#e2e8f0" },
-    margin: { t: 20, b: 40, l: 150, r: 60 },
-    xaxis: {
-      gridcolor: "#2b3a55",
-      tickprefix: "R$ ",
-      tickformat: ",.0f",
-      automargin: true,
+    data: {
+      labels: labels,
+      datasets: [{
+        label: "Desconto",
+        data: values,
+        backgroundColor: "#ef4444",
+        hoverBackgroundColor: "#f87171",
+        borderRadius: 6,
+        barPercentage: 0.7,
+        categoryPercentage: 0.8,
+      }],
     },
-    yaxis: { gridcolor: "#2b3a55", automargin: true, autorange: "reversed" },
-    bargap: 0.3,
-  };
-
-  plotChart("deductions-breakdown-chart", [trace], layout, { responsive: true });
+    options: {
+      indexAxis: "y",               // barras horizontais
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        datalabels: {
+          display: function () { return dataLabelsOn; },
+          anchor: "end",
+          align: "end",
+          offset: 5,
+          color: "#fda4af",
+          font: { size: 11, weight: "700" },
+          formatter: function (value) { return formatCurrency(value); },
+        },
+        tooltip: chartTooltip({
+          callbacks: {
+            label: function (ctx) {
+              const v = Number(ctx.parsed.x) || 0;
+              const pct = total ? (v / total * 100) : 0;
+              return formatCurrency(v) + " (" + formatPercent(pct) + " do total de descontos)";
+            },
+          },
+        }),
+      },
+      scales: {
+        x: {
+          beginAtZero: true,
+          grid: { color: "rgba(148,163,184,0.08)" },
+          ticks: { callback: chartAxisMoney },
+        },
+        y: { grid: { display: false } },
+      },
+    },
+  });
 }
 
 // Tabela de holerites -------------------------------------------------
@@ -1149,52 +1390,74 @@ async function loadAnomalies(selectedMonth, selectedCompany) {
 
 
 function renderOvertimeBreakdown(overtime) {
+  const id = "overtime-breakdown-chart";
+  if (!getChartCanvas(id)) return;
   overtime = overtime || {};
   const labels = Array.isArray(overtime.labels) ? overtime.labels : [];
   const values = Array.isArray(overtime.values) ? overtime.values : [];
   const outros = overtime.outros || { labels: [], values: [] };
   const outrosTotal = (outros.values || []).reduce(function (s, v) { return s + (Number(v) || 0); }, 0);
+  const sum = values.reduce(function (s, v) { return s + (Number(v) || 0); }, 0);
+  const colors = ["#3b82f6", "#f59e0b", "#a855f7", "#64748b"];
 
-  // Tooltip rico (multi-linha) para a fatia 'Outros Proventos'.
-  const customdata = labels.map(function (label) {
-    if (label === "Outros Proventos") {
-      const lines = (outros.labels || []).map(function (sub, j) {
-        const v = Number((outros.values || [])[j] || 0);
-        const pct = outrosTotal ? (v / outrosTotal * 100) : 0;
-        return sub + ": " + formatCurrency(v) + " (" + formatPercent(pct) + ")";
-      });
-      return lines.join("<br>");
-    }
-    return "";
-  });
-
-  const layout = {
-    title: "",
-    paper_bgcolor: "rgba(0,0,0,0)",
-    plot_bgcolor: "rgba(0,0,0,0)",
-    font: { color: "#e2e8f0" },
-    // Legenda à direita, com margem extra p/ "DSR sobre Extras" não clippar.
-    margin: { t: 20, b: 20, l: 20, r: 150 },
-    legend: { orientation: "v", x: 1, y: 0.5, xanchor: "left", yanchor: "middle" },
-    showlegend: true,
-  };
-
-  const trace = {
-    labels: labels,
-    values: values,
-    type: "pie",
-    hole: 0.5,
-    textinfo: "label+percent",
-    customdata: customdata,
-    hovertemplate: "%{label}<br>%{customdata}<br><b>R$ %{value:,.2f}</b><extra></extra>",
-    marker: {
-      colors: ["#3b82f6", "#f59e0b", "#a855f7", "#64748b"],
+  mountChart(id, {
+    type: "doughnut",
+    data: {
+      labels: labels,
+      datasets: [{
+        data: values.map(function (v) { return Number(v) || 0; }),
+        backgroundColor: colors,
+        borderColor: "#0f172a",
+        borderWidth: 2,
+        hoverOffset: 6,
+      }],
     },
-  };
-
-  plotChart("overtime-breakdown-chart", [trace], layout, {
-    responsive: true,
-    displayModeBar: false,
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      cutout: "58%",
+      plugins: {
+        legend: {
+          position: isMobileViewport() ? "bottom" : "right",
+          labels: { boxWidth: 10, padding: 12, color: "#e2e8f0" },
+        },
+        datalabels: {
+          display: function (ctx) {
+            if (!dataLabelsOn) return false;
+            const v = Number(ctx.dataset.data[ctx.dataIndex]) || 0;
+            const pct = sum ? (v / sum * 100) : 0;
+            return pct > 5;                 // só fatias com área relevante
+          },
+          color: "#ffffff",
+          anchor: "center",
+          align: "center",
+          font: { size: 12, weight: "800" },
+          formatter: function (value) {
+            const pct = sum ? (Number(value) / sum * 100) : 0;
+            return Math.round(pct) + "%";
+          },
+        },
+        tooltip: chartTooltip({
+          displayColors: true,
+          callbacks: {
+            label: function (ctx) {
+              const v = Number(ctx.raw) || 0;
+              const pct = sum ? (v / sum * 100) : 0;
+              return " " + formatCurrency(v) + " (" + formatPercent(pct) + ")";
+            },
+            afterBody: function (items) {
+              const i = items.length ? items[0].dataIndex : -1;
+              if (i < 0 || labels[i] !== "Outros Proventos") return [];
+              return (outros.labels || []).map(function (sub, j) {
+                const v = Number((outros.values || [])[j] || 0);
+                const pct = outrosTotal ? (v / outrosTotal * 100) : 0;
+                return sub + ": " + formatCurrency(v) + " (" + formatPercent(pct) + ")";
+              });
+            },
+          },
+        }),
+      },
+    },
   });
 }
 
@@ -1697,6 +1960,7 @@ document.addEventListener("DOMContentLoaded", function () {
   safeInit(initAI);
   safeInit(initEffHourlyToggle);
   safeInit(initExplainButtons);
+  safeInit(initViewToggles);
   safeInit(loadPlanInfo);
   safeInit(loadDashboard);
 });

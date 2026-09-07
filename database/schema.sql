@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS users (
     plan          TEXT    NOT NULL DEFAULT 'free'
                          CHECK (plan IN ('free', 'pro')),
     is_active     INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
+    profile_completed INTEGER NOT NULL DEFAULT 0
+                          CHECK (profile_completed IN (0, 1)),
     created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
     updated_at    TEXT    NOT NULL DEFAULT (datetime('now'))
 );

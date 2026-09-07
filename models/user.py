@@ -45,6 +45,7 @@ class User:
     role: str = ROLE_USER
     plan: str = PLAN_FREE
     is_active: bool = True
+    profile_completed: bool = False
     password_hash: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
@@ -62,6 +63,13 @@ def _row_to_user(row) -> User:
     """Converte uma linha SQLite em um objeto User."""
     if row is None:
         return None
+    # Leitura defensiva de `profile_completed` (bancos antigos podem não ter a
+    # coluna até a migração rodar). Ausente -> trata como perfil já preenchido
+    # para não quebrar fluxos legados.
+    try:
+        profile_completed = bool(row["profile_completed"])
+    except (KeyError, IndexError):
+        profile_completed = True
     return User(
         id=row["id"],
         name=row["name"],
@@ -69,6 +77,7 @@ def _row_to_user(row) -> User:
         role=str(row["role"] or ROLE_USER).lower(),
         plan=str(row["plan"] or PLAN_FREE).lower(),
         is_active=bool(row["is_active"]),
+        profile_completed=profile_completed,
         password_hash=row["password_hash"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -95,6 +104,8 @@ def create_user_table(db):
             plan          TEXT    NOT NULL DEFAULT 'free'
                                    CHECK (plan IN ('free', 'pro')),
             is_active     INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
+            profile_completed INTEGER NOT NULL DEFAULT 0
+                                   CHECK (profile_completed IN (0, 1)),
             created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
             updated_at    TEXT    NOT NULL DEFAULT (datetime('now'))
         )
@@ -102,6 +113,7 @@ def create_user_table(db):
     )
     ensure_user_role_column(db)
     ensure_user_plan_column(db)
+    ensure_user_profile_completed_column(db)
     db.commit()
 
 
@@ -153,6 +165,37 @@ def ensure_user_plan_column(db):
         WHERE plan NOT IN ('free', 'pro') OR plan IS NULL
         """
     )
+
+
+def ensure_user_profile_completed_column(db):
+    """
+    Adiciona a coluna `profile_completed` (onboarding) a bancos criados antes
+    da migração. Idempotente: só altera a tabela se a coluna ainda não existir.
+    Novos usuários começam com `profile_completed = 0` (funil de onboarding).
+    """
+    cols = {
+        r["name"]
+        for r in db.execute(f"PRAGMA table_info({USER_TABLE})").fetchall()
+    }
+    if "profile_completed" not in cols:
+        db.execute(
+            f"ALTER TABLE {USER_TABLE} "
+            "ADD COLUMN profile_completed INTEGER NOT NULL DEFAULT 0"
+        )
+    # Defensivo: normaliza valores NULL -> 0 (onboarding pendente).
+    db.execute(
+        f"UPDATE {USER_TABLE} SET profile_completed = 0 WHERE profile_completed IS NULL"
+    )
+
+
+def set_user_profile_completed(db, user_id: int, completed: bool) -> Optional[User]:
+    """Marca o onboarding do usuário como concluído (True) ou pendente (False)."""
+    db.execute(
+        f"UPDATE {USER_TABLE} SET profile_completed = ?, updated_at = datetime('now') WHERE id = ?",
+        [1 if completed else 0, user_id],
+    )
+    db.commit()
+    return get_user(db, user_id)
 
 
 def get_user(db, user_id: int) -> Optional[User]:

@@ -51,6 +51,19 @@
 
   <main class="container pb-5">
 
+    <!-- Barra de controles globais: Privacidade (máscara) & Rótulos -->
+    <div class="d-flex flex-wrap align-items-center gap-2 mb-3 view-controls" role="toolbar" aria-label="Controles do dashboard">
+      <button type="button" id="privacyToggle" class="btn btn-sm btn-outline-light" aria-pressed="false"
+              title="Mascarar valores (R$ ****) em cards e gráficos">
+        <i class="bi bi-eye-slash me-1"></i>👁️ <span>Visibilidade</span>
+      </button>
+      <button type="button" id="labelsToggle" class="btn btn-sm btn-outline-info" aria-pressed="true"
+              title="Mostrar/ocultar rótulos de dados nos gráficos">
+        <i class="bi bi-tags me-1"></i>🏷️ <span>Rótulos</span> <span class="lbl-state badge text-bg-info">ON</span>
+      </button>
+      <span class="text-secondary small ms-1" id="viewHint"></span>
+    </div>
+
     <!-- Mensagens flash -->
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
@@ -425,7 +438,9 @@
         <div class="card panel h-100">
           <div class="card-body">
             <h5 class="panel-title mb-2"><i class="bi bi-graph-up me-2"></i>Renda Líquida x Bruta</h5>
-            <div id="monthly-trend-chart" class="chart-container"></div>
+            <div class="chart-container">
+              <canvas id="monthly-trend-chart" class="chart-fill" role="img" aria-label="Renda Líquida x Bruta"></canvas>
+            </div>
           </div>
         </div>
       </div>
@@ -433,7 +448,9 @@
         <div class="card panel h-100">
           <div class="card-body">
             <h5 class="panel-title mb-2"><i class="bi bi-bar-chart me-2"></i>Decomposição de Descontos</h5>
-            <div id="deductions-breakdown-chart" class="chart-container"></div>
+            <div class="chart-container">
+              <canvas id="deductions-breakdown-chart" class="chart-fill" role="img" aria-label="Decomposição de Descontos"></canvas>
+            </div>
           </div>
         </div>
       </div>
@@ -441,7 +458,9 @@
         <div class="card panel h-100">
           <div class="card-body">
             <h5 class="panel-title mb-2"><i class="bi bi-clipboard-data me-2"></i>Proporção da Renda: Base × H.E. × DSR</h5>
-            <div id="overtime-breakdown-chart" class="chart-container"></div>
+            <div class="chart-container">
+              <canvas id="overtime-breakdown-chart" class="chart-fill" role="img" aria-label="Proporção da Renda"></canvas>
+            </div>
           </div>
         </div>
       </div>
@@ -449,7 +468,9 @@
         <div class="card panel h-100">
           <div class="card-body">
             <h5 class="panel-title mb-2"><i class="bi bi-calendar-range me-2"></i>Projeção Patrimonial Anual</h5>
-            <div id="annual-projection-chart" class="chart-container"></div>
+            <div class="chart-container">
+              <canvas id="annual-projection-chart" class="chart-fill" role="img" aria-label="Projeção Patrimonial Anual"></canvas>
+            </div>
           </div>
         </div>
       </div>
@@ -489,7 +510,7 @@
 
   <!-- Rodapé -->
   <footer class="footer text-center py-3">
-    Dashboard Financeiro Pessoal &middot; Flask + SQLite + DeepSeek + Plotly
+    Dashboard Financeiro Pessoal &middot; Flask + SQLite + DeepSeek + Chart.js
   </footer>
 
   <!-- Modal de detalhe -->
@@ -690,7 +711,8 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-  <script src="https://cdn.plot.ly/plotly-2.32.0.min.js" charset="utf-8"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
   <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
 </body>
 </html>
