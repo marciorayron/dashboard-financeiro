@@ -636,6 +636,117 @@ def build_effective_hourly_views(
     }
 
 
+def _received_aggregate(
+    user_id: int,
+    mes_referencia: Optional[str] = None,
+    company_name: Optional[str] = None,
+    year: Optional[str] = None,
+    month_now: Optional[int] = None,
+) -> dict:
+    """Agrega os valores RECEBIDOS com UMA única lógica (compartilhada pelo KPI
+    "Total Líquido/Bruto" e pela projeção "Já recebido YTD", evitando drift):
+
+      * GROSS = FOLHA_MENSAL vencedora (maior bruto) por competência. O
+        ADIANTAMENTO (/B02) é offset na folha — o gross dele NUNCA é somado.
+      * NET = take-home real = net da FOLHA vencedora + net dos ADIANTAMENTO.
+
+    `year` restringe a competências do ano; `month_now` (1..12) mantém apenas
+    competências já decorridas (mês <= month_now).
+    """
+    db = get_db()
+    query = (
+        "SELECT tipo_documento, mes_referencia, totals FROM holerites "
+        "WHERE user_id = ?"
+    )
+    params: List = [user_id]
+    if mes_referencia:
+        query += " AND mes_referencia = ?"
+        params.append(mes_referencia)
+    if company_name:
+        query += " AND company_name = ?"
+        params.append(company_name)
+    if year:
+        query += " AND mes_referencia LIKE ?"
+        params.append(year + "-%")
+
+    rows = db.execute(query, params).fetchall()
+
+    folha_best: dict = {}   # mes -> (gross, net) da FOLHA vencedora
+    advance_net: dict = {}  # mes -> soma net dos ADIANTAMENTO
+    present = set()
+    for row in rows:
+        mes = str(row["mes_referencia"] or "")[:7]
+        if not mes:
+            continue
+        if year and not mes.startswith(year):
+            continue
+        try:
+            m = int(mes[5:7])
+        except (ValueError, TypeError):
+            m = None
+        if month_now is not None and (m is None or m > month_now):
+            continue
+        td = str(row["tipo_documento"] or "").upper()
+        if td not in ("FOLHA_MENSAL", "ADIANTAMENTO"):
+            continue  # férias/PPR/outros não são salário mensal da competência
+        present.add(mes)
+        totals = _load_totals(row)
+        net = _to_float(totals.get("net_value"))
+        gross = _to_float(totals.get("total_earnings"))
+        if td == "FOLHA_MENSAL":
+            cur = folha_best.get(mes)
+            if cur is None or gross > cur[0]:
+                folha_best[mes] = (gross, net)
+        else:  # ADIANTAMENTO
+            advance_net[mes] = advance_net.get(mes, 0.0) + net
+
+    gross_total = 0.0
+    net_total = 0.0
+    for mes in present:
+        if mes in folha_best:
+            gross_total += folha_best[mes][0]
+            net_total += folha_best[mes][1]
+        net_total += advance_net.get(mes, 0.0)
+
+    return {
+        "gross": round(gross_total, 2),
+        "net": round(net_total, 2),
+        "months": len(present),
+    }
+
+
+def get_period_totals(
+    user_id: int,
+    mes_referencia: Optional[str] = None,
+    company_name: Optional[str] = None,
+) -> dict:
+    """
+    Total bruto e líquido RECEBIDOS no período filtrado (competência/empresa).
+
+    GROSS (`total_earnings`) vem SOMENTE do documento `FOLHA_MENSAL` da
+    competência (o de MAIOR bruto, se houver folha duplicada). A `FOLHA_MENSAL`
+    já embute salário-base + H.E. + DSR; o `ADIANTAMENTO` (/B02) é um offset
+    lançado como dedução nessa folha — NUNCA somamos o gross do `ADIANTAMENTO`
+    (evita dupla contagem no total bruto).
+
+    NET = take-home REAL = soma do `net_value` de TODOS os paystubs da
+    competência (folha + adiantamento), refletindo o caixa efetivo.
+
+    Returns:
+        dict: {"gross", "net", "months", "month", "company"}.
+    """
+    agg = _received_aggregate(
+        user_id, mes_referencia=mes_referencia, company_name=company_name
+    )
+    return {
+        "gross": agg["gross"],
+        "net": agg["net"],
+        "months": agg["months"],
+        "month": mes_referencia,
+        "company": company_name,
+    }
+
+
 def get_advanced_analytics(
     user_id: int,
     mes_referencia: Optional[str] = None,
@@ -710,6 +821,20 @@ def get_advanced_analytics(
         month_types.setdefault(month, set()).add(
             str(row["tipo_documento"] or "").upper()
         )
+
+    # GROSS REAL (para alíquota de retenção / tax bite): apenas a FOLHA_MENSAL
+    # vencedora por competência. O ADIANTAMENTO (/B02) é offset na folha — somar
+    # o gross dele dobraria o denominador e mascararia a retenção real.
+    real_gross_best: dict = {}
+    for row in rows_totals:
+        if str(row["tipo_documento"] or "").upper() == "FOLHA_MENSAL":
+            mes = str(row["mes_referencia"] or "")[:7]
+            if not mes:
+                continue
+            g = _to_float(_load_totals(row).get("total_earnings"))
+            if g > real_gross_best.get(mes, 0.0):
+                real_gross_best[mes] = g
+    real_gross = sum(real_gross_best.values())
 
     # Exclui meses incompletos do divisor: mês atual/ativo e meses com férias.
     import datetime
@@ -800,14 +925,15 @@ def get_advanced_analytics(
     # 'Descontos Efetivos' = apenas custo real de bolso (impostos + operacionais).
     true_deductions = inss_amount + irrf_amount + operational_amount
 
-    # 3) Métricas derivadas (todas sobre o total de proventos).
-    effective_tax_rate = _safe_div(total_deductions, total_earnings) * 100.0
-    effective_deductions_rate = _safe_div(true_deductions, total_earnings) * 100.0
+    # 3) Métricas derivadas. Retenção/overtime usam o GROSS REAL (só FOLHA) —
+    #    adiantamento não entra no denominador (evita mascarar o tax bite).
+    effective_tax_rate = _safe_div(total_deductions, real_gross) * 100.0
+    effective_deductions_rate = _safe_div(true_deductions, real_gross) * 100.0
     overtime_ratio = (
-        _safe_div(overtime_total + dsr_overtime_total, total_earnings) * 100.0
+        _safe_div(overtime_total + dsr_overtime_total, real_gross) * 100.0
     )
-    inss_rate = _safe_div(inss_amount, total_earnings) * 100.0
-    irrf_rate = _safe_div(irrf_amount, total_earnings) * 100.0
+    inss_rate = _safe_div(inss_amount, real_gross) * 100.0
+    irrf_rate = _safe_div(irrf_amount, real_gross) * 100.0
 
     base_ratio = _safe_div(base_salary, total_earnings) * 100.0
     variable_pay = max(total_earnings - base_salary, 0.0)
@@ -904,6 +1030,10 @@ def get_advanced_analytics(
         },
     }
 
+    # Totais acumulados do período filtrado (bruto/líquido) — somente
+    # FOLHA_MENSAL, com deduplicação por competência (documento de maior bruto).
+    period_totals = get_period_totals(user_id, mes_referencia, company_name)
+
     return {
         "meta": {
             "count": count,
@@ -922,6 +1052,7 @@ def get_advanced_analytics(
             "monthly_hours": round(monthly_hours, 2),
             "base_hourly": round(base_hourly, 2),
         },
+        "period_totals": period_totals,
         "overtime": {
             "total": round(overtime_total, 2),
             "dsr_overtime": round(dsr_overtime_total, 2),
@@ -1096,6 +1227,119 @@ def calculate_overtime_impact(
 
 
 
+def calculate_reverse_overtime_net(
+    profile,
+    target_net: float,
+    multiplier: float = 1.7,
+    dsr_rate: float = 0.18,
+) -> dict:
+    """
+    Simulador REVERSO de horas extras — LÍQUIDO no bolso.
+
+    Dado um valor LÍQUIDO alvo (R$ a receber na mão) e uma alíquota de H.E.
+    (multiplicador único: 70% => x1.70, 100% => x2.00), calcula quantas horas
+    extras são necessárias por GROSS-UP iterativo, considerando o DSR (18%) e
+    a retenção marginal de INSS + IRRF (tabelas progressivas).
+
+    Definição (consistente com a tela):
+        gross_total  = HE + DSR           (HE = hours * hourly * multiplier)
+        tax_marginal = INSS(total) - INSS(baseline) + IRRF(...)
+        net          = gross_total - tax_marginal
+
+    Enquanto `net` for menor que `target_net`, as horas são escaladas até a
+    convergência (a retenção marginal em faixas progressivas muda com as horas,
+    então o gross-up é iterativo, não uma simples divisão).
+
+    Returns:
+        dict com required_hours, gross_extra (HE), dsr, gross_total, net (≈
+        target_net), marginal_inss, marginal_irrf, tax_bite, net_per_hour.
+    """
+    target_net = max(float(target_net or 0.0), 0.0)
+    multiplier = float(multiplier or 1.7)
+    if multiplier <= 0:
+        multiplier = 1.7
+    dsr_rate = max(float(dsr_rate or 0.0), 0.0)
+    pct = int(round((multiplier - 1) * 100))
+
+    def _empty_result():
+        return {
+            "target_net": round(target_net, 2),
+            "multiplier": round(multiplier, 2),
+            "required_hours": 0.0,
+            "hourly_rate": 0.0,
+            "gross_extra": 0.0,
+            "dsr": 0.0,
+            "gross_total": 0.0,
+            "net": 0.0,
+            "rate_label": f"{pct}% (×{multiplier:.2f})",
+            "dsr_rate": round(dsr_rate, 4),
+            "dsr_rate_pct": round(dsr_rate * 100.0, 1),
+            "marginal_inss": 0.0,
+            "marginal_irrf": 0.0,
+            "tax_bite": 0.0,
+            "net_per_hour": 0.0,
+        }
+
+    if profile is None or getattr(profile, "base_rate", 0.0) <= 0:
+        return _empty_result()
+
+    dependents = int(getattr(profile, "irrf_dependents", 0) or 0)
+    hourly, baseline_gross = _profile_hourly_gross(profile)
+
+    def compute(hours):
+        """Retorna (net, he_gross, dsr, gross_total, m_inss, m_irrf, m_tax)."""
+        hours = max(float(hours or 0.0), 0.0)
+        he_gross = hours * hourly * multiplier
+        dsr = he_gross * dsr_rate
+        gross_total = he_gross + dsr
+
+        total = baseline_gross + gross_total
+        inss_base = _progressive_inss(baseline_gross)
+        inss_total = _progressive_inss(total)
+        m_inss = inss_total - inss_base
+
+        irrf_base = _progressive_irrf(baseline_gross - inss_base, dependents)
+        irrf_total = _progressive_irrf(total - inss_total, dependents)
+        m_irrf = irrf_total - irrf_base
+
+        m_tax = m_inss + m_irrf
+        net = max(gross_total - m_tax, 0.0)
+        return net, he_gross, dsr, gross_total, m_inss, m_irrf, m_tax
+
+    if target_net <= 0:
+        return _empty_result()
+
+    # Estimativa inicial ignorando impostos, depois itera o gross-up.
+    denom = hourly * multiplier * (1.0 + dsr_rate)
+    hours = _safe_div(target_net, denom)
+    for _ in range(80):
+        net, *_ = compute(hours)
+        if hours <= 0 or net <= 0:
+            break
+        if abs(target_net - net) < 0.005:
+            break
+        hours = hours * (target_net / net)
+
+    net, he_gross, dsr, gross_total, m_inss, m_irrf, m_tax = compute(hours)
+    return {
+        "target_net": round(target_net, 2),
+        "multiplier": round(multiplier, 2),
+        "required_hours": round(hours, 2),
+        "hourly_rate": round(hourly, 2),
+        "gross_extra": round(he_gross, 2),
+        "dsr": round(dsr, 2),
+        "gross_total": round(gross_total, 2),
+        "net": round(net, 2),
+        "rate_label": f"{pct}% (×{multiplier:.2f})",
+        "dsr_rate": round(dsr_rate, 4),
+        "dsr_rate_pct": round(dsr_rate * 100.0, 1),
+        "marginal_inss": round(m_inss, 2),
+        "marginal_irrf": round(m_irrf, 2),
+        "tax_bite": round(m_tax, 2),
+        "net_per_hour": round(_safe_div(net, hours), 2),
+    }
+
+
 # ---------------------------------------------------------------------
 # Auditoria de paystubs & detecção de anomalias
 # ---------------------------------------------------------------------
@@ -1252,6 +1496,97 @@ def audit_paystub_anomalies(
 # ---------------------------------------------------------------------
 # Projeção financeira anual & planejamento tributário
 # ---------------------------------------------------------------------
+
+def get_paystub_ot_retention_stats(user_id: int) -> dict:
+    """
+    Agrega, dos paystubs `FOLHA_MENSAL` disponíveis, as médias usadas na
+    projeção anual realista:
+
+      * `avg_overtime_dsr`: média mensal de Horas Extras + DSR (proventos),
+        calculada como (total H.E.+DSR) / (nº de competências com folha).
+      * `retention_rate`: alíquota efetiva de retenção (INSS + IRRF) calculada
+        sobre os valores REAIS das rubricas (0..100).
+
+    Quando não há histórico retorna `months == 0` (o chamador deve cair no
+    cálculo progressivo por tabela).
+    """
+    db = get_db()
+    rub_rows = db.execute(
+        """
+        SELECT r.codigo, r.descricao, r.tipo, r.valor
+        FROM rubricas_holerite r
+        JOIN holerites h ON h.id = r.holerite_id
+        WHERE r.user_id = ? AND h.tipo_documento = 'FOLHA_MENSAL'
+        """,
+        [user_id],
+    ).fetchall()
+
+    gross_rows = db.execute(
+        "SELECT mes_referencia, totals FROM holerites "
+        "WHERE user_id = ? AND tipo_documento = 'FOLHA_MENSAL'",
+        [user_id],
+    ).fetchall()
+
+    months = set()
+    for g in gross_rows:
+        mes = str(g["mes_referencia"] or "")[:7]
+        if mes:
+            months.add(mes)
+
+    ot_dsr = 0.0
+    inss_irrf = 0.0
+    for r in rub_rows:
+        valor = _to_float(_row_get(r, "valor"))
+        if (_is_overtime(r) or _is_dsr_overtime(r)) and str(_row_get(r, "tipo") or "").lower() == "provento":
+            ot_dsr += valor
+        if _is_inss(r) or _is_irrf(r):
+            inss_irrf += abs(valor)
+
+    gross_total = 0.0
+    for g in gross_rows:
+        totals = _load_totals(g)
+        gross_total += _to_float(totals.get("total_earnings"))
+
+    n = len(months)
+    retention_rate = (_safe_div(inss_irrf, gross_total) * 100.0) if gross_total > 0 else 0.0
+    return {
+        "avg_overtime_dsr": round((ot_dsr / n) if n else 0.0, 2),
+        "retention_rate": round(retention_rate, 2),
+        "months": n,
+    }
+
+
+def get_realized_ytd(user_id: int, year: Optional[str] = None, month_now: Optional[int] = None) -> dict:
+    """
+    Soma o LÍQUIDO realmente recebido no ano (YTD), até o mês atual/informado.
+
+    Para alinhar com o KPI "Total Líquido Recebido", considera o take-home REAL
+    do mês = soma do `net_value` de TODOS os paystubs da competência (folha
+    mensal + adiantamento recebido no mês), exatamente como a agregação mensal
+    de caixa usada nas métricas avançadas. Apenas competências já decorridas
+    (mês <= `month_now`) do `year` entram; as demais são projetadas à parte
+    (não há dupla contagem).
+
+    Returns:
+        dict: {"net", "gross", "months", "elapsed_months"}.
+    """
+    import datetime
+
+    today = datetime.date.today()
+    year = str(year or today.year)
+    if month_now is None:
+        month_now = int(today.month)
+    month_now = int(month_now)
+
+    agg = _received_aggregate(user_id, year=year, month_now=month_now)
+    return {
+        "net": agg["net"],
+        "gross": agg["gross"],
+        "months": agg["months"],
+        "elapsed_months": month_now,
+    }
+
+
 def get_annual_financial_projection(profile, historical_data: Optional[dict] = None) -> dict:
     """
     Projeta o take-home anual do usuário.
@@ -1277,40 +1612,120 @@ def get_annual_financial_projection(profile, historical_data: Optional[dict] = N
 
     monthly_net = float(historical_data.get("monthly_net") or 0.0) or theoretical_recurrent_net(profile)
 
-    # 13º salário: base mensal bruta, parcelas em Nov e Dez (50% cada).
+    # Média mensal de H.E./DSR e alíquota efetiva de retenção (histórico real).
+    avg_ot_dsr = max(float(historical_data.get("avg_overtime_dsr") or 0.0), 0.0)
+    retention_rate = float(historical_data.get("retention_rate") or 0.0)
+    has_retention = bool(historical_data.get("retention_has_data"))
+
+    def _net_from_rate(base_gross, use_retention):
+        # Líquido pela alíquota média de retenção real (INSS+IRRF) quando há
+        # histórico; caso contrário cai nas tabelas progressivas oficiais.
+        if use_retention and retention_rate > 0:
+            return max(base_gross * (1.0 - retention_rate / 100.0), 0.0)
+        inss = _progressive_inss(base_gross)
+        irrf = _progressive_irrf(base_gross - inss, dependents)
+        return max(base_gross - inss - irrf, 0.0)
+
+    # 13º salário (retrocompatível, base mensal do perfil sem H.E.).
     inss_13 = _progressive_inss(monthly_gross)
     irrf_13 = _progressive_irrf(monthly_gross - inss_13, dependents)
     net_13 = max(monthly_gross - inss_13 - irrf_13, 0.0)
     installment = net_13 / 2.0
 
-    # 1/3 constitucional de férias.
+    # 1/3 constitucional de férias (retrocompatível).
     third = monthly_gross / 3.0
     inss_v = _progressive_inss(third)
     irrf_v = _progressive_irrf(third - inss_v, dependents)
     net_vacation = max(third - inss_v - irrf_v, 0.0)
+
+    # CLT: 13º e 1/3 de férias incidem sobre (base mensal + média H.E./DSR).
+    base_13_ot = monthly_gross + avg_ot_dsr
+    third_ot = base_13_ot / 3.0
+    net_13_ot = _net_from_rate(base_13_ot, has_retention)
+    net_vacation_ot = _net_from_rate(third_ot, has_retention)
 
     # PPR/PLR estimado (média histórica de folhas PPR).
     ppr_avg = float(historical_data.get("ppr_avg") or 0.0)
 
     baseline_annual = monthly_net * 12
     total = baseline_annual + net_13 + net_vacation + ppr_avg
+    total_incl_ot = baseline_annual + net_13_ot + net_vacation_ot + ppr_avg
+
+    # Modelo "Realizado + Meses Restantes" (ano corrente):
+    #   anual_projetado = JÁ recebido (YTD líquido) + (meses restantes × média
+    #   mensal projetada) + 13º + férias (1/3).
+    realized_net_ytd = float(historical_data.get("realized_net_ytd") or 0.0)
+    realized_gross_ytd = float(historical_data.get("realized_gross_ytd") or 0.0)
+    remaining_months = int(historical_data.get("remaining_months") or 0)
+    monthly_projected_net = (
+        float(historical_data.get("monthly_projected_net") or 0.0) or monthly_net
+    )
+    use_ytd_model = remaining_months > 0
+    projection_year = str(historical_data.get("year") or "")
+    remaining_projection_net = (
+        remaining_months * monthly_projected_net if use_ytd_model else 0.0
+    )
+    total_projected = (
+        # total = Realizado YTD + Projeção Restante + 13º Net + Férias Net.
+        # (os meses YTD já decorridos NÃO são duplicados na Projeção Restante)
+        realized_net_ytd + remaining_projection_net + net_13_ot + net_vacation_ot
+        if use_ytd_model
+        else total_incl_ot
+    )
+
+    # --- Breakdown passo a passo (auditoria/verificação) ---
+    # Realizado YTD (meses 1..mês atual; NÃO duplica com a projeção) +
+    # Projeção Restante ((12 - mês atual) * média mensal líquida) +
+    # 13º Net + Férias (1/3) Net (+ PPR).
+    projection_breakdown = {
+        "realized_net_ytd": round(realized_net_ytd, 2),
+        "remaining_projection_net": round(remaining_projection_net, 2),
+        "thirteenth_net_incl_ot": round(net_13_ot, 2),
+        "vacation_net_incl_ot": round(net_vacation_ot, 2),
+        "ppr_estimate": round(ppr_avg, 2),
+        "total_annual_projected": round(total_projected, 2),
+    }
+    import logging
+    logging.getLogger(__name__).info(
+        "AnnualProjection total=%s breakdown=%s",
+        projection_breakdown["total_annual_projected"],
+        projection_breakdown,
+    )
 
     return {
         "monthly_gross": round(monthly_gross, 2),
         "monthly_net": round(monthly_net, 2),
         "baseline_annual": round(baseline_annual, 2),
+        "projection_year": projection_year,
+        "avg_overtime_dsr": round(avg_ot_dsr, 2),
+        "retention_rate": round(retention_rate if has_retention else 0.0, 2),
+        "retention_has_data": has_retention,
+        "includes_overtime": avg_ot_dsr > 0,
         "thirteenth": {
             "gross": round(monthly_gross, 2),
             "net": round(net_13, 2),
+            "gross_incl_ot": round(base_13_ot, 2),
+            "net_incl_ot": round(net_13_ot, 2),
             "first_installment": round(installment, 2),
             "second_installment": round(installment, 2),
         },
         "vacation_bonus": {
             "gross": round(third, 2),
             "net": round(net_vacation, 2),
+            "gross_incl_ot": round(third_ot, 2),
+            "net_incl_ot": round(net_vacation_ot, 2),
         },
         "ppr_estimate": round(ppr_avg, 2),
         "total_annual_take_home": round(total, 2),
+        "total_annual_take_home_incl_ot": round(total_incl_ot, 2),
+        "realized_net_ytd": round(realized_net_ytd, 2),
+        "realized_gross_ytd": round(realized_gross_ytd, 2),
+        "remaining_months": remaining_months,
+        "monthly_projected_net": round(monthly_projected_net, 2),
+        "remaining_projection_net": round(remaining_projection_net, 2),
+        "use_ytd_model": use_ytd_model,
+        "total_annual_projected": round(total_projected, 2),
+        "total_projection_breakdown": projection_breakdown,
         "seasonal_spikes": [
             {"label": "1ª parcela 13º", "month": "Novembro", "amount": round(installment, 2)},
             {"label": "2ª parcela 13º", "month": "Dezembro", "amount": round(installment, 2)},

@@ -352,6 +352,8 @@ function mountChart(id, config) {
     if (!ctx) { console.error("Chart.js: canvas sem contexto 2d:", id); return null; }
     const chart = new Chart(ctx, config);
     chartRegistry[id] = chart;
+    // Mobile-first: adapta eixos/rotação de rótulos conforme a largura atual.
+    try { applyChartMobileScales(chart); } catch (err) { /* noop */ }
     return chart;
   } catch (err) {
     console.error("Chart.js mount error:", err);
@@ -459,6 +461,70 @@ function refreshAllCharts() {
     if (chart) {
       try { chart.update(); } catch (err) { /* noop */ }
     }
+  });
+}
+
+// ---- Mobile-first (Chart.js) --------------------------------------------
+// Breakpoint móvel dos gráficos: telas < 640px.
+function isChartMobile() {
+  if (typeof window === "undefined") return false;
+  if (window.matchMedia) return !window.matchMedia("(min-width: 640px)").matches;
+  return (window.innerWidth || 0) < 640;
+}
+
+// Data labels só aparecem em telas >= 640px (e se o toggle "🏷️ Rótulos" estiver ON).
+// Em telas pequenas os valores continuam acessíveis via tooltip (toque/click),
+// evitando sobreposição de textos flutuantes nos gráficos.
+function dataLabelsAllowed() {
+  return dataLabelsOn && !isChartMobile();
+}
+
+// Ajusta os eixos dos gráficos para telas pequenas:
+// rótulos de categoria no eixo X rotacionados em 45° (evita sobreposição de
+// títulos como "Baseline 12m", "13º Salário", competências, etc.).
+// Barras horizontais e donuts não são rotacionadas (categoria vai no eixo Y).
+function applyChartMobileScales(chart) {
+  if (!chart || !chart.options || !chart.options.scales) return;
+  const mobile = isChartMobile();
+  const type = chart.config && chart.config.type;
+  const indexAxis = chart.options.indexAxis;
+  const isVerticalCategory = type === "bar" && indexAxis !== "y";
+  const isLineChart = type === "line";
+  if (!isVerticalCategory && !isLineChart) return;
+  const ticks = chart.options.scales.x && chart.options.scales.x.ticks;
+  if (!ticks) return;
+  if (mobile) {
+    ticks.maxRotation = 45;
+    ticks.minRotation = 45;
+    ticks.autoSkip = true;
+    ticks.autoSkipPadding = 6;
+  } else {
+    ticks.maxRotation = 0;
+    ticks.minRotation = 0;
+    ticks.autoSkip = true;
+    ticks.autoSkipPadding = 24;
+  }
+}
+
+// Reaplica as adaptações mobile a todos os gráficos ativos (ex.: ao cruzar o
+// breakpoint de 640px redimensionando/janela ou girando o aparelho).
+function syncChartsWithViewport() {
+  Object.keys(chartRegistry).forEach(function (id) {
+    const chart = chartRegistry[id];
+    if (!chart) return;
+    try {
+      applyChartMobileScales(chart);
+      chart.update();
+    } catch (err) { /* noop */ }
+  });
+}
+
+// Debounce simples para evitar recálculos em cascata durante o redimensionar.
+let _mobileResizeTimer = null;
+if (typeof window !== "undefined") {
+  window.addEventListener("resize", function () {
+    clearTimeout(_mobileResizeTimer);
+    _mobileResizeTimer = setTimeout(syncChartsWithViewport, 150);
   });
 }
 
@@ -640,8 +706,16 @@ function applyAdvancedAnalytics(data) {
   const overtime = data.overtime || {};
   const taxes = data.tax_rates || {};
   const meta = data.meta || {};
+  const pt = data.period_totals || {};
   const inssRate = Number(taxes.inss && taxes.inss.rate) || 0;
   const irrfRate = Number(taxes.irrf && taxes.irrf.rate) || 0;
+
+  // Totais acumulados do período filtrado (bruto/líquido recebidos).
+  safeText("kpiPeriodGross", formatCurrency(pt.gross));
+  safeText("kpiPeriodNet", formatCurrency(pt.net));
+  const ptLabel = buildPeriodTotalsLabel(pt);
+  safeText("kpiPeriodGrossSub", ptLabel);
+  safeText("kpiPeriodNetSub", ptLabel);
 
   safeText("kpiRecurrentNet", formatCurrency(meta.recurrent_net_pay));
   safeText("kpiRecurrentNetSub", "média de " + (meta.recurrent_net_months || 0) + " meses completos");
@@ -659,6 +733,17 @@ function applyAdvancedAnalytics(data) {
 
   safeRender(function () { renderOvertimeBreakdown(overtime); });
   safeRender(function () { renderWorkHours(data); });
+}
+
+// Rótulo de contexto do período filtrado para os cartões de total
+// (ex.: "competência 2026-04" ou "3 competência(s) · Empresa X").
+function buildPeriodTotalsLabel(pt) {
+  pt = pt || {};
+  const parts = [];
+  if (pt.month) parts.push("competência " + pt.month);
+  else if (pt.months) parts.push(String(pt.months) + " competência(s)");
+  if (pt.company) parts.push(pt.company);
+  return parts.join(" · ") || "período filtrado";
 }
 
 // Jornada de Trabalho & Horas Extras --------------------------------
@@ -693,14 +778,46 @@ function renderWorkHours(data) {
 
 function renderAnnualProjection(d) {
   if (!d || d.error) return;
-  safeText("kpiAnnualInflow", formatCurrency(d.total_annual_take_home));
-  safeText("kpiAnnualInflowSub",
-    "baseline " + formatCurrency(d.baseline_annual) + "/12m · Acumulado Global");
+  const incl = !!(d.includes_overtime) || (Number(d.avg_overtime_dsr) > 0);
+  const t13 = d.thirteenth || {};
+  const v13 = d.vacation_bonus || {};
+  const useYtd = !!(d.use_ytd_model);
+
+  const total = useYtd
+    ? (Number(d.total_annual_projected) || Number(d.total_annual_take_home_incl_ot) || 0)
+    : (Number(d.total_annual_take_home_incl_ot) || Number(d.total_annual_take_home) || 0);
+  safeText("kpiAnnualInflow", formatCurrency(total));
+
+  let sub;
+  if (useYtd) {
+    const yr = d.projection_year || String(new Date().getFullYear());
+    sub = "Já recebido (" + yr + "): " + formatCurrency(d.realized_net_ytd) +
+      " + " + (d.remaining_months || 0) + " meses restantes";
+  } else {
+    sub = "baseline " + formatCurrency(d.baseline_annual) + "/12m · Acumulado Global";
+  }
+  if (incl && Number(d.avg_overtime_dsr) > 0) sub += " · incl. H.E./DSR";
+  safeText("kpiAnnualInflowSub", sub);
+
   // Alimenta o Planejador de Poupança com o líquido base e bônus (13º + férias).
   savingsData.monthlyNet = Number(d.monthly_net) || 0;
-  savingsData.thirteenth = Number(d.thirteenth && d.thirteenth.net) || 0;
-  savingsData.vacation = Number(d.vacation_bonus && d.vacation_bonus.net) || 0;
+  savingsData.thirteenth = Number(t13.net_incl_ot) || Number(t13.net) || 0;
+  savingsData.vacation = Number(v13.net_incl_ot) || Number(v13.net) || 0;
   if (savingsUpdater) savingsUpdater();
+
+  // Nota explicativa: 13º/férias já com média de H.E./DSR (CLT).
+  const noteEl = document.getElementById("annualChartNote");
+  if (noteEl) {
+    if (incl && Number(d.avg_overtime_dsr) > 0) {
+      noteEl.classList.remove("d-none");
+      noteEl.textContent =
+        "13º e férias já incluem média de H.E./DSR (" + formatCurrency(d.avg_overtime_dsr) + "/mês)" +
+        (d.retention_has_data ? " · líquido por alíquota real de retenção" : "");
+    } else {
+      noteEl.classList.add("d-none");
+    }
+  }
+
   safeRender(function () { renderAnnualWaterfall(d); });
 }
 
@@ -756,23 +873,42 @@ function initTaxProjection() {
 function renderAnnualWaterfall(d) {
   const id = "annual-projection-chart";
   if (!getChartCanvas(id)) return;
-  const baseline = Number(d.baseline_annual) || 0;
-  const thirteenth = Number(d.thirteenth && d.thirteenth.net) || 0;
-  const vacation = Number(d.vacation_bonus && d.vacation_bonus.net) || 0;
-  const ppr = Number(d.ppr_estimate) || 0;
-  const total = Number(d.total_annual_take_home) || 0;
+  const t13 = d.thirteenth || {};
+  const v13 = d.vacation_bonus || {};
 
-  const labels = ["Baseline 12m", "13º Salário", "Férias (1/3)", "PPR/PLR", "Total Anual"];
-  const deltas = [baseline, thirteenth, vacation, ppr, total];
-  // Barras flutuantes [início, fim] — aproximação de waterfall.
+  const realized = Number(d.realized_net_ytd) != null ? (Number(d.realized_net_ytd) || 0) : (Number(d.baseline_annual) || 0);
+  const remaining = Number(d.remaining_projection_net) || 0;
+  const thirteenth = Number(t13.net_incl_ot) || Number(t13.net) || 0;
+  const vacation = Number(v13.net_incl_ot) || Number(v13.net) || 0;
+  const total = Number(d.total_annual_projected) ||
+    Number(d.total_annual_take_home_incl_ot) ||
+    Number(d.total_annual_take_home) || 0;
+
+  // ---- Audit / log da decomposição de `total_annual_projected` ----
+  // total = Realizado YTD (meses 1..mês atual; NÃO é duplicado na projeção) +
+  //         Projeção Restante ((12 − mês atual) × média mensal líquida) +
+  //         13º Net + Férias (1/3) Net
+  console.log("[AnnualProjection] breakdown", {
+    realized_net_ytd: Number(d.realized_net_ytd) || 0,
+    remaining_months: Number(d.remaining_months) || 0,
+    monthly_projected_net: Number(d.monthly_projected_net) || 0,
+    remaining_projection_net: Number(d.remaining_projection_net) || 0,
+    thirteenth_net_incl_ot: Number(d.thirteenth && d.thirteenth.net_incl_ot) || 0,
+    vacation_net_incl_ot: Number(d.vacation_bonus && d.vacation_bonus.net_incl_ot) || 0,
+    total_annual_projected: Number(d.total_annual_projected) || 0,
+  });
+
+  const labels = ["Realizado YTD", "Projeção Restante", "13º Salário", "Férias (1/3)", "Total Anual Projetado"];
+  const deltas = [realized, remaining, thirteenth, vacation, total];
   const floats = [
-    [0, baseline],
-    [baseline, baseline + thirteenth],
-    [baseline + thirteenth, baseline + thirteenth + vacation],
-    [baseline + thirteenth + vacation, baseline + thirteenth + vacation + ppr],
+    [0, realized],
+    [realized, realized + remaining],
+    [realized + remaining, realized + remaining + thirteenth],
+    [realized + remaining + thirteenth, realized + remaining + thirteenth + vacation],
     [0, total],
   ];
-  const colors = ["#3b82f6", "#22c55e", "#22c55e", "#22c55e", "#8b5cf6"];
+  const colors = ["#3b82f6", "#38bdf8", "#22c55e", "#22c55e", "#8b5cf6"];
+  const isMobile = isChartMobile();
 
   mountChart(id, {
     type: "bar",
@@ -785,40 +921,58 @@ function renderAnnualWaterfall(d) {
         borderColor: colors,
         borderWidth: 1,
         borderRadius: 6,
-        barPercentage: 0.55,
+        barPercentage: 0.5,
+        categoryPercentage: 0.7,
       }],
     },
     options: {
       responsive: true,
       maintainAspectRatio: false,
+      // Datalabel do topo (ex.: "+R$ 59.726,83") não pode ser cortado.
+      layout: { padding: { top: 28 } },
       plugins: {
         legend: { display: false },
         datalabels: {
-          display: function () { return dataLabelsOn; },
+          display: function () { return dataLabelsAllowed(); },
           anchor: "end",
           align: "end",
-          offset: 4,
+          offset: 2,
           color: "#e2e8f0",
-          font: { size: 11, weight: "700" },
           clamp: true,
+          font: { size: isMobile ? 9 : 11, weight: "700" },
           formatter: function (value, ctx) {
-            const delta = deltas[ctx.dataIndex] || 0;
-            return (ctx.dataIndex === 0 ? "" : "+") + formatCurrency(delta);
+            if (ctx.dataIndex === 4) return formatCurrency(deltas[4]);
+            if (ctx.dataIndex === 0) return "";
+            return "+" + formatCurrency(deltas[ctx.dataIndex]);
           },
         },
         tooltip: chartTooltip({
           callbacks: {
             label: function (ctx) {
-              const delta = deltas[ctx.dataIndex] || 0;
-              return (ctx.dataIndex === 0 ? "" : "+") + formatCurrency(delta);
+              const idx = ctx.dataIndex;
+              if (idx === 4) return "Total: " + formatCurrency(deltas[4]);
+              if (idx === 0) return "Realizado YTD: " + formatCurrency(deltas[0]);
+              return labels[idx] + ": +" + formatCurrency(deltas[idx]);
             },
           },
         }),
       },
       scales: {
-        x: { grid: { display: false }, ticks: { autoSkip: false, maxRotation: 0 } },
+        x: {
+          grid: { display: false },
+          ticks: {
+            // Exibe TODAS as 5 categorias sob suas barras (sem auto-skip).
+            autoSkip: false,
+            maxRotation: 45,
+            minRotation: 0,
+            autoSkipPadding: 4,
+            font: { size: 11 },
+          },
+        },
         y: {
           beginAtZero: true,
+          // grace extra p/ o datalabel do topo não encostar/cortar na borda.
+          grace: "15%",
           grid: { color: "rgba(148,163,184,0.08)" },
           ticks: { callback: chartAxisMoney },
         },
@@ -908,7 +1062,7 @@ function renderMonthlyTrend(series) {
         },
         vacationMarkers: { indexes: isVacation },   // 🌴 marcador de férias
         datalabels: {
-          display: function () { return dataLabelsOn; },
+          display: function () { return dataLabelsAllowed(); },
           color: "#94a3b8",
           anchor: "center",
           align: "top",
@@ -1021,7 +1175,7 @@ function renderDeductions(items) {
       plugins: {
         legend: { display: false },
         datalabels: {
-          display: function () { return dataLabelsOn; },
+          display: function () { return dataLabelsAllowed(); },
           anchor: "end",
           align: "end",
           offset: 5,
@@ -1082,8 +1236,8 @@ function renderHoleritesTable(items) {
       "<td>" + liquid + "</td>",
       "<td>" + gross + "</td>",
       "<td class=\"text-end\">",
-      "  <button class=\"btn btn-sm btn-outline-primary me-1 btn-detail\" data-id=\"" + h.id + "\">",
-      "    <i class=\"bi bi-eye\"></i>",
+      "  <button type=\"button\" class=\"btn btn-sm btn-outline-primary me-1 btn-detail\" data-id=\"" + h.id + "\" title=\"Analisar holerite\">",
+      "    <i class=\"bi bi-search me-1\"></i>Analisar",
       "  </button>",
       "  <button class=\"btn btn-sm btn-outline-danger btn-delete\" data-id=\"" + h.id + "\">",
       "    <i class=\"bi bi-trash\"></i>",
@@ -1139,7 +1293,69 @@ async function loadDashboard() {
 
 
 // Detalhe do holerite ------------------------------------------------
+// Holerite ativo no modal de detalhe (para a IA por competência).
+let currentDetailHoleriteId = null;
+
+// "Entenda seu Holerite com IA": pergunta contextual de UM holerite.
+function initPaystubAI() {
+  const input = document.getElementById("paystubAiInput");
+  const btn = document.getElementById("paystubAiAsk");
+  if (!input || !btn) return;
+
+  const ans = document.getElementById("paystubAiAnswer");
+  const setBusy = function (busy) {
+    if (!btn) return;
+    btn.disabled = busy;
+    btn.innerHTML = busy
+      ? '<span class="spinner-border spinner-border-sm me-1"></span>Analisando...'
+      : '<i class="bi bi-send me-1"></i>Perguntar';
+  };
+
+  async function submit() {
+    const q = String(input.value || "").trim();
+    if (!q) { showToast("Digite uma pergunta.", "warning"); return; }
+    if (!currentDetailHoleriteId) { showToast("Selecione um holerite.", "warning"); return; }
+    if (ans) {
+      ans.classList.remove("d-none");
+      ans.classList.add("text-secondary");
+      ans.textContent = "Consultando a IA sobre esta competência...";
+    }
+    setBusy(true);
+    try {
+      const data = await apiPostJson("/api/analytics/explain-paystub", {
+        holerite_id: currentDetailHoleriteId,
+        question: q,
+      });
+      if (ans) {
+        ans.classList.remove("text-secondary");
+        ans.textContent = (data && data.answer) || "Sem resposta.";
+      }
+    } catch (err) {
+      if (ans) {
+        ans.classList.remove("d-none");
+        ans.classList.add("text-secondary");
+        ans.textContent = "";
+      }
+      if (err.status === 402 || err.status === 429) {
+        openUpgradeModal(err.data && err.data.message);
+      } else {
+        showToast(err.message || "Falha ao consultar a IA.", "danger");
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  btn.addEventListener("click", submit);
+  input.addEventListener("keydown", function (e) { if (e.key === "Enter") submit(); });
+}
+
 async function openDetail(id) {
+  currentDetailHoleriteId = id;
+  const payAns = document.getElementById("paystubAiAnswer");
+  if (payAns) { payAns.classList.add("d-none"); payAns.textContent = ""; }
+  const payInput = document.getElementById("paystubAiInput");
+  if (payInput) payInput.value = "";
   try {
     const data = await apiGet("/api/holerites/" + id);
 
@@ -1423,7 +1639,7 @@ function renderOvertimeBreakdown(overtime) {
         },
         datalabels: {
           display: function (ctx) {
-            if (!dataLabelsOn) return false;
+            if (!dataLabelsAllowed()) return false;
             const v = Number(ctx.dataset.data[ctx.dataIndex]) || 0;
             const pct = sum ? (v / sum * 100) : 0;
             return pct > 5;                 // só fatias com área relevante
@@ -1582,94 +1798,113 @@ function initProfile() {
 
 
 function initOvertimeSimulator() {
-  const slider = document.getElementById("otHoursSlider");
-  if (!slider) return;
-
-  // Percentual padrão do DSR (Descanso Semanal Remunerado) sobre o bruto de
-  // horas extras. Usado como estimativa quando a razão exata de dias
-  // trabalhados/não-trabalhados não é informada pela API.
-  const DSR_RATE = 0.18;
+  const input = document.getElementById("otTargetAmount");
+  const group = document.getElementById("otRateToggle");
+  if (!input || !group) return;
 
   const els = {
-    label: document.getElementById("otHoursLabel"),
     multipliers: document.getElementById("otMultipliersLabel"),
+    requiredHours: document.getElementById("otRequiredHours"),
+    requiredHint: document.getElementById("otRequiredHint"),
     gross: document.getElementById("otGrossExtra"),
     grossBreakdown: document.getElementById("otGrossBreakdown"),
     net: document.getElementById("otNet"),
-    rate: document.getElementById("otEffectiveRate"),
+    taxBiteCard: document.getElementById("otTaxBiteCard"),
+    taxBitePct: document.getElementById("otTaxBitePct"),
     perHour: document.getElementById("otPerHour"),
-    taxBite: document.getElementById("otTaxBite"),
+    perHourLine: document.getElementById("otPerHourLine"),
   };
   const set = function (key, value) {
     if (els[key] && value !== undefined && value !== null) els[key].textContent = value;
   };
 
+  const RATE_LABELS = { "1.7": "70%", "2.0": "100%" };
+
+  function otHoursText(h) {
+    const rounded = Math.round((Number(h) || 0) * 2) / 2;
+    return rounded.toLocaleString("pt-BR", { maximumFractionDigits: 1 }) + " h";
+  }
+
+  function activeRate() {
+    const active = group.querySelector(".btn.active");
+    const r = parseFloat((active && active.getAttribute("data-rate")) || "1.7");
+    return (r === 2.0) ? 2.0 : 1.7;
+  }
+
+  function zero() {
+    set("requiredHours", "0 h");
+    set("requiredHint", "Informe a meta LÍQUIDA desejada.");
+    set("gross", formatCurrency(0));
+    set("grossBreakdown", "");
+    set("net", formatCurrency(0));
+    set("taxBiteCard", formatCurrency(0));
+    set("taxBitePct", "");
+    set("perHour", "R$ 0,00");
+    set("perHourLine", "");
+  }
+
   let timer = null;
 
   function update() {
-    const hours = Number(slider.value) || 0;
-    set("label", hours + " h");
+    const mult = activeRate();
+    const lbl = RATE_LABELS[String(mult)] || ("×" + mult.toFixed(2));
+    set("multipliers", "H.E. a " + lbl + " (×" + mult.toFixed(2) + ") · meta LÍQUIDA");
     if (timer) clearTimeout(timer);
-    timer = setTimeout(fetchImpact, 80);
+    timer = setTimeout(function () { fetchReverse(mult); }, 80);
   }
 
-  async function fetchImpact() {
-    const hours = Number(slider.value) || 0;
+  async function fetchReverse(mult) {
+    const targetNet = Math.max(Number(input.value) || 0, 0);
     try {
-      const d = await apiGet("/api/analytics/overtime-impact?hours=" + hours);
+      const d = await apiGet("/api/analytics/overtime-reverse?net=" + targetNet + "&rate=" + mult);
       if (!d || typeof d !== "object") {
-        set("perHour", "Configure o salário base no perfil para simular.");
+        set("perHourLine", "Configure o salário base no perfil para simular.");
         return;
       }
-      // Sem salário base configurado -> mensagem orientativa (não congela).
-      if ((Number(d.hourly_rate) || 0) <= 0) {
-        set("perHour", "Configure o salário base no perfil para simular.");
-        set("gross", formatCurrency(0));
-        set("grossBreakdown", "");
-        set("net", formatCurrency(0));
-        set("rate", "—");
-        set("taxBite", "");
+      if ((Number(d.hourly_rate) || 0) <= 0 || targetNet <= 0) {
+        zero();
+        if ((Number(d.hourly_rate) || 0) <= 0) {
+          set("requiredHint", "Configure o salário base no perfil para simular.");
+        }
         return;
       }
-      if (d.multipliers_label) set("multipliers", "Horas Extras: " + d.multipliers_label);
 
-      const extraHours = Number(d.extra_hours) || 0;
-      const overtimeGross = Number(d.gross_extra) || 0;
+      const requiredHours = Number(d.required_hours) || 0;
+      const heGross = Number(d.gross_extra) || 0;
+      const dsr = Number(d.dsr) || 0;
+      const grossTotal = Number(d.gross_total) || 0;
+      const net = Number(d.net) || targetNet;
+      const taxBite = Number(d.tax_bite) || 0;
+      const mInss = Number(d.marginal_inss) || 0;
+      const mIrrf = Number(d.marginal_irrf) || 0;
+      const perHourNet = Number(d.net_per_hour) || (requiredHours > 0 ? net / requiredHours : 0);
+      const dsrPct = (Number(d.dsr_rate_pct) >= 0) ? Number(d.dsr_rate_pct) : 18;
 
-      // DSR (Descanso Semanal Remunerado) sobre o bruto das horas extras.
-      // Estimativa padrão de 18%; se a API informar a razão exata de dias
-      // trabalhados/não-trabalhados, usa-se dsr_days/working_days no lugar.
-      const dsr = overtimeGross * DSR_RATE;
-      const totalExtraGross = overtimeGross + dsr;
-
-      // Recalcula a retenção marginal (INSS + IRRF) sobre o TOTAL extra
-      // (H.E. + DSR) e deriva o líquido e a taxa efetiva por hora.
-      const retentionPct = (Number(d.tax_bite_pct) || 0) / 100;
-      const marginalTax = totalExtraGross * retentionPct;
-      const netExtra = totalExtraGross - marginalTax;
-      const perHourNet = extraHours > 0 ? netExtra / extraHours : 0;
-
-      set("gross", formatCurrency(totalExtraGross));
-      set("grossBreakdown",
-        "HE: " + formatCurrency(overtimeGross) +
-        " + DSR (" + Math.round(DSR_RATE * 100) + "%): " + formatCurrency(dsr));
-      set("net", formatCurrency(netExtra));
-      set("rate", extraHours > 0 ? formatCurrency(perHourNet) : "—");
-      set("perHour", extraHours > 0
-        ? "Líquido por hora extra (com DSR): " + formatCurrency(perHourNet)
-        : "Arraste o slider para simular.");
-      set("taxBite", extraHours > 0
-        ? "Retenção marginal: " + formatCurrency(marginalTax) + " (" + formatPercent(d.tax_bite_pct) + ")"
-        : "");
+      set("requiredHours", otHoursText(requiredHours));
+      set("requiredHint", "Meta líquida " + formatCurrency(targetNet) + " no bolso · HE bruta " + formatCurrency(heGross));
+      set("gross", formatCurrency(grossTotal));
+      set("grossBreakdown", "HE: " + formatCurrency(heGross) + " + DSR (" + dsrPct + "%): " + formatCurrency(dsr));
+      set("net", formatCurrency(net));
+      set("taxBiteCard", formatCurrency(taxBite));
+      set("taxBitePct", "INSS " + formatCurrency(mInss) + " + IRRF " + formatCurrency(mIrrf));
+      set("perHour", formatCurrency(perHourNet));
+      set("perHourLine", "Recebe " + formatCurrency(net) + " por " + otHoursText(requiredHours) + " extras (líquido na mão).");
     } catch (err) {
-      console.error("overtime sim:", err);
-      set("perHour", "Configure o salário base no perfil para simular.");
-      set("taxBite", "");
+      console.error("overtime reverse:", err);
+      set("perHourLine", "Configure o salário base no perfil para simular.");
+      set("taxBitePct", "");
       set("grossBreakdown", "");
     }
   }
 
-  slider.addEventListener("input", update);
+  input.addEventListener("input", update);
+  group.addEventListener("click", function (e) {
+    const btn = e.target.closest("[data-rate]");
+    if (!btn) return;
+    group.querySelectorAll(".btn").forEach(function (b) { b.classList.remove("active"); });
+    btn.classList.add("active");
+    update();
+  });
   update();
 }
 
@@ -1749,12 +1984,9 @@ function initSavingsPlanner() {
 // Central de Inconsistências & Auditoria ----------------------------
 function renderAnomalies(flags) {
   flags = Array.isArray(flags) ? flags : [];
-  const list = document.getElementById("anomalyList");
-  const empty = document.getElementById("anomalyEmpty");
-  const count = document.getElementById("anomalyCount");
 
-  // Total R$ das discrepâncias monetárias detectadas no painel de auditoria
-  // (ex.: surtos de benefícios — refeição, plano de saúde, fretado).
+  // Total R$ das discrepâncias monetárias detectadas (ex.: surtos de
+  // benefícios — refeição, plano de saúde, fretado).
   const totalDiscrepancy = flags.reduce(function (sum, f) {
     const amt = (typeof f.amount === "number" && isFinite(f.amount))
       ? f.amount
@@ -1766,50 +1998,6 @@ function renderAnomalies(flags) {
 
   // Preenche o modal de detalhamento (itemizado) com as mesmas inconsistências.
   renderInconsistencyBreakdown(flags);
-
-  if (!list) return;
-  count.textContent = (flags || []).length;
-
-  if (!flags || !flags.length) {
-    list.innerHTML = "";
-    empty.classList.remove("d-none");
-    return;
-  }
-  empty.classList.add("d-none");
-
-  // Ordena por severidade (HIGH > MEDIUM > LOW).
-  const order = { HIGH: 0, MEDIUM: 1, LOW: 2 };
-  const sorted = (flags.slice()).sort(function (a, b) {
-    return (order[a.severity] === undefined ? 9 : order[a.severity]) -
-           (order[b.severity] === undefined ? 9 : order[b.severity]);
-  });
-
-  // Guarda os dados ordenados para o botão "✨ Explicar" (por índice).
-  window._anomalyData = sorted;
-
-  list.innerHTML = sorted.map(function (f, idx) {
-    const tone = f.severity === "HIGH" ? "danger" : (f.severity === "MEDIUM" ? "warning" : "info");
-    const variance = extractVariance(f.description);
-    const varianceHtml = variance === null
-      ? ""
-      : '<span class="badge text-bg-' + (Math.abs(variance) >= 5 ? "danger" : "secondary") + ' anomaly-var">Δ ' +
-        Math.abs(variance).toFixed(1).replace(".", ",") + " p.p.</span>";
-    return [
-      '<div class="list-group-item anomaly-row">',
-      '  <div class="d-flex align-items-center gap-2 flex-wrap mb-1">',
-      '    <span class="badge text-bg-' + tone + ' anomaly-sev">' + escapeHtml(f.severity || "INFO") + '</span>',
-      '    <span class="badge text-bg-dark anomaly-cat">' + escapeHtml(f.category || "auditoria") + '</span>',
-      '    <span class="small text-secondary anomaly-date">' + escapeHtml(f.month || "—") + '</span>',
-      '    ' + varianceHtml,
-      '  </div>',
-      '  <div class="anomaly-title">' + escapeHtml(f.title) + '</div>',
-      '  <div class="small text-secondary anomaly-desc">' + escapeHtml(f.description) + '</div>',
-      '  <div class="d-flex justify-content-end mt-1">',
-      '    <button type="button" class="btn btn-sm btn-outline-info ai-explain-btn" data-index="' + idx + '" title="Explicar com IA">✨ Explicar</button>',
-      '  </div>',
-      '</div>',
-    ].join("");
-  }).join("");
 }
 
 // Detalhamento itemizado do total de inconsistências (modal + relatório).
@@ -1917,17 +2105,9 @@ function initAI() {
     });
   });
 
-  // Delegado: botão "✨ Explicar" em cada card de inconsistência.
-  const anomalyList = document.getElementById("anomalyList");
-  if (anomalyList) {
-    anomalyList.addEventListener("click", function (e) {
-      const btn = e.target.closest(".ai-explain-btn");
-      if (btn) {
-        const idx = parseInt(btn.getAttribute("data-index"), 10);
-        explainAnomalyByIndex(idx);
-      }
-    });
-  }
+  // A "Central de Inconsistências & Auditoria" foi removida do layout; as
+  // inconsistências agora são detalhadas exclusivamente no modal itemizado,
+  // aberto pelo card KPI "Inconsistências (Total R$)".
 
   // Fecha o drawer de explicação da IA.
   const drawerClose = document.getElementById("aiDrawerClose");
@@ -1958,6 +2138,7 @@ document.addEventListener("DOMContentLoaded", function () {
   safeInit(initSavingsPlanner);
   safeInit(initTaxProjection);
   safeInit(initAI);
+  safeInit(initPaystubAI);
   safeInit(initEffHourlyToggle);
   safeInit(initExplainButtons);
   safeInit(initViewToggles);

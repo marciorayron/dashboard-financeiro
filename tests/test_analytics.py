@@ -1072,3 +1072,524 @@ def test_get_monthly_series_vacation_event_metadata(db, register_user, login):
         assert "vacation_net_prepayment" not in point
         assert "total_effective_cashflow" not in point
 
+
+
+# ---------------------------------------------------------------------
+# Simulador REVERSO de horas extras (target R$ + taxa 70%/100%)
+# ---------------------------------------------------------------------
+def test_reverse_overtime_net_70_rate(overtime_profile):
+    # H.E. a 70% (x1.70). Metade líquida de R$ 150 "no bolso": o gross-up deve
+    # devolver net ≈ target (considerando DSR + INSS/IRRF marginais).
+    res = a.calculate_reverse_overtime_net(overtime_profile, target_net=150.0, multiplier=1.7)
+    assert res["net"] == pytest.approx(150.0, abs=0.05)
+    assert res["required_hours"] > 0.0
+    assert res["gross_total"] > res["net"]          # houve retenção
+    assert res["gross_extra"] > 0.0
+    assert res["hourly_rate"] == pytest.approx(10.0)
+    assert res["multiplier"] == pytest.approx(1.7)
+    assert res["marginal_inss"] >= 0.0
+    assert res["marginal_irrf"] >= 0.0
+    assert res["tax_bite"] >= 0.0
+    assert res["net_per_hour"] > 0.0
+
+
+def test_reverse_overtime_net_100_rate(overtime_profile):
+    # H.E. a 100% (x2.00). Mesmo target líquido pede MENOS horas que a 70%.
+    res = a.calculate_reverse_overtime_net(overtime_profile, target_net=200.0, multiplier=2.0)
+    assert res["net"] == pytest.approx(200.0, abs=0.05)
+    assert res["multiplier"] == pytest.approx(2.0)
+    assert res["required_hours"] > 0.0
+    assert res["gross_total"] > res["net"]
+
+
+def test_reverse_overtime_net_no_profile():
+    res = a.calculate_reverse_overtime_net(None, target_net=100.0, multiplier=1.7)
+    assert res["required_hours"] == 0.0
+    assert res["net"] == 0.0
+    assert res["hourly_rate"] == 0.0
+    assert res["tax_bite"] == 0.0
+
+
+
+# ---------------------------------------------------------------------
+# Totais acumulados do período (bruto/líquido) — FOLHA_MENSAL deduplicado
+# ---------------------------------------------------------------------
+def test_get_period_totals_dedups_by_competence(db, register_user, login):
+    """Gross = FOLHA_MENSAL vencedora (maior bruto) por competência; Net =
+    take-home real = net da FOLHA vencedora + net do ADIANTAMENTO. FÉRIAS/PPR
+    ficam fora (não são salário mensal da competência)."""
+    import json as _json
+
+    from models.user import get_user_by_email
+
+    email = "period_totals@example.com"
+    register_user(email=email)
+    login(email=email)
+    uid = get_user_by_email(db, email).id
+
+    def _insert(doc_type, mes, gross, net, company="Empresa"):
+        totals = _json.dumps(
+            {
+                "base_salary": gross,
+                "total_earnings": gross,
+                "total_deductions": round(max(gross - net, 0.0), 2),
+                "net_value": net,
+            }
+        )
+        db.execute(
+            "INSERT INTO holerites "
+            "(user_id, company_name, mes_referencia, tipo_documento, totals) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [uid, company, mes, doc_type, totals],
+        )
+
+    # Duas FOLHA_MENSAL no MESMO mês -> vence a de maior bruto (5000/4000).
+    _insert("FOLHA_MENSAL", "2026-01", 5000.0, 4000.0)
+    _insert("FOLHA_MENSAL", "2026-01", 3000.0, 2000.0)
+    # Segundo mês normal.
+    _insert("FOLHA_MENSAL", "2026-02", 6000.0, 4800.0)
+    # FÉRIAS/PPR ficam fora; ADIANTAMENTO entra apenas no NET (caixa real),
+    # nunca no GROSS (o gross da FOLHA já cobre a competência; /B02 é offset).
+    _insert("ADIANTAMENTO", "2026-02", 1000.0, 700.0, company="Outra")
+    _insert("FERIAS", "2026-03", 9000.0, 8000.0, company="Outra")
+    db.commit()
+
+    res = a.get_period_totals(uid)
+    assert res["gross"] == pytest.approx(5000.0 + 6000.0, abs=1e-2)   # 11000 (só FOLHA)
+    assert res["net"] == pytest.approx(4000.0 + 4800.0 + 700.0, abs=1e-2)  # 9500
+    assert res["months"] == 2
+
+    # Filtro por competência.
+    one = a.get_period_totals(uid, mes_referencia="2026-01")
+    assert one["gross"] == pytest.approx(5000.0, abs=1e-2)
+    assert one["net"] == pytest.approx(4000.0, abs=1e-2)
+    assert one["months"] == 1
+
+    # Filtro por empresa (só há FOLHA_MENSAL em 'Empresa').
+    comp = a.get_period_totals(uid, company_name="Empresa")
+    assert comp["months"] == 2
+
+
+# ---------------------------------------------------------------------
+# Endpoints (rotas) — via test client
+# ---------------------------------------------------------------------
+def test_overtime_reverse_endpoint_requires_login(client):
+    resp = client.get("/api/analytics/overtime-reverse")
+    assert resp.status_code == 401
+
+
+def test_overtime_reverse_endpoint_ok(client, register_user, login):
+    email = "ot_reverse@example.com"
+    register_user(email=email)
+    login(email=email)
+    resp = client.get("/api/analytics/overtime-reverse?net=150&rate=1.7")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    # Sem perfil configurado -> hourly 0, mas o contrato é preservado.
+    assert "required_hours" in body
+    assert "gross_total" in body
+    assert "gross_extra" in body
+    assert "marginal_inss" in body
+    assert "marginal_irrf" in body
+    assert "net_per_hour" in body
+    assert body["hourly_rate"] == 0.0
+
+
+def test_advanced_endpoint_includes_period_totals(client, register_user, login):
+    email = "pt_advanced@example.com"
+    register_user(email=email)
+    login(email=email)
+    resp = client.get("/api/analytics/advanced")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert "period_totals" in body
+    assert body["period_totals"]["gross"] == 0.0
+    assert body["period_totals"]["net"] == 0.0
+    assert body["period_totals"]["months"] == 0
+
+
+
+# ---------------------------------------------------------------------
+# Projeção anual aprimorada — 13º & férias com H.E./DSR + retenção real
+# ---------------------------------------------------------------------
+def test_annual_projection_includes_overtime_and_retention():
+    profile = UserProfile(
+        user_id=1,
+        contract_type="MENSALISTA",
+        base_rate=3000.0,
+        irrf_dependents=0,
+        fixed_benefits_deduction=0.0,
+    )
+    hist = {
+        "avg_overtime_dsr": 300.0,
+        "retention_rate": 10.0,
+        "retention_has_data": True,
+        "monthly_net": 2500.0,
+        "ppr_avg": 0.0,
+    }
+    res = a.get_annual_financial_projection(profile, hist)
+
+    # 13º: base mensal + média H.E./DSR (CLT).
+    assert res["thirteenth"]["gross_incl_ot"] == pytest.approx(3300.0)
+    # Líquido pela alíquota de retenção real (10%).
+    assert res["thirteenth"]["net_incl_ot"] == pytest.approx(3300.0 * 0.9)
+    # 1/3 de férias sobre a base ampliada.
+    assert res["vacation_bonus"]["gross_incl_ot"] == pytest.approx(3300.0 / 3.0)
+    assert res["vacation_bonus"]["net_incl_ot"] == pytest.approx((3300.0 / 3.0) * 0.9)
+    assert res["includes_overtime"] is True
+    assert res["retention_rate"] == pytest.approx(10.0)
+    # Retrocompatibilidade: campos antigos preservados.
+    assert res["thirteenth"]["gross"] == pytest.approx(3000.0)
+    assert res["total_annual_take_home"] == pytest.approx(
+        2500.0 * 12 + res["thirteenth"]["net"] + res["vacation_bonus"]["net"]
+    )
+    assert res["total_annual_take_home_incl_ot"] == pytest.approx(
+        2500.0 * 12 + 3300.0 * 0.9 + (3300.0 / 3.0) * 0.9
+    )
+
+
+def test_annual_projection_fallback_progressive_without_history():
+    profile = UserProfile(
+        user_id=1,
+        contract_type="MENSALISTA",
+        base_rate=3000.0,
+        irrf_dependents=0,
+        fixed_benefits_deduction=0.0,
+    )
+    # Média de H.E./DSR presente, mas SEM retenção histórica -> tabela progressiva.
+    res = a.get_annual_financial_projection(
+        profile, {"avg_overtime_dsr": 300.0, "monthly_net": 2500.0, "ppr_avg": 0.0}
+    )
+    assert res["thirteenth"]["gross_incl_ot"] == pytest.approx(3300.0)
+    assert res["thirteenth"]["net_incl_ot"] > 0.0
+    assert res["thirteenth"]["net_incl_ot"] < res["thirteenth"]["gross_incl_ot"]
+    assert res["retention_has_data"] is False
+    assert res["total_annual_take_home_incl_ot"] is not None
+
+
+def test_get_paystub_ot_retention_stats_empty(db, register_user, login):
+    from models.user import get_user_by_email
+
+    email = "ot_stats_empty@example.com"
+    register_user(email=email)
+    login(email=email)
+    uid = get_user_by_email(db, email).id
+    res = a.get_paystub_ot_retention_stats(uid)
+    assert res["months"] == 0
+    assert res["avg_overtime_dsr"] == 0.0
+    assert res["retention_rate"] == 0.0
+
+
+
+def test_get_paystub_ot_retention_stats_from_paystubs(db, register_user, login):
+    import json as _json
+
+    from models.user import get_user_by_email
+
+    email = "ot_stats_real@example.com"
+    register_user(email=email)
+    login(email=email)
+    uid = get_user_by_email(db, email).id
+
+    totals = _json.dumps(
+        {
+            "base_salary": 10000.0,
+            "total_earnings": 10000.0,
+            "total_deductions": 1500.0,
+            "net_value": 8500.0,
+        }
+    )
+    cur = db.execute(
+        "INSERT INTO holerites (user_id, company_name, mes_referencia, tipo_documento, totals) "
+        "VALUES (?, 'Empresa', '2026-01', 'FOLHA_MENSAL', ?)",
+        [uid, totals],
+    )
+    hid = cur.lastrowid
+    # Rubricas reais (INSS/IRRF detectáveis pela descrição) — retenção 15%.
+    for cod, desc, valor in (("999", "INSS", -1000.0), ("999", "IRRF", -500.0)):
+        db.execute(
+            "INSERT INTO rubricas_holerite (holerite_id, user_id, codigo, descricao, tipo, valor) "
+            "VALUES (?, ?, ?, ?, 'desconto', ?)",
+            [hid, uid, cod, desc, valor],
+        )
+    db.commit()
+
+    res = a.get_paystub_ot_retention_stats(uid)
+    assert res["months"] == 1
+    assert res["retention_rate"] == pytest.approx(15.0, abs=1e-2)
+    assert res["avg_overtime_dsr"] == 0.0
+
+
+# ---------------------------------------------------------------------
+# Endpoint de IA por holerite / competência (explain-paystub)
+# ---------------------------------------------------------------------
+def _insert_paystub_for_ai(db, uid, company="Empresa AI", mes="2026-01"):
+    import json as _json
+
+    totals = _json.dumps(
+        {
+            "base_salary": 3000.0,
+            "total_earnings": 3600.0,
+            "total_deductions": 400.0,
+            "net_value": 3200.0,
+        }
+    )
+    cur = db.execute(
+        "INSERT INTO holerites (user_id, company_name, mes_referencia, tipo_documento, totals) "
+        "VALUES (?, ?, ?, 'FOLHA_MENSAL', ?)",
+        [uid, company, mes, totals],
+    )
+    return cur.lastrowid
+
+
+def test_explain_paystub_endpoint_ok(client, register_user, login, db):
+    from models.user import get_user_by_email
+
+    email = "pay_ai_ok@example.com"
+    register_user(email=email)
+    login(email=email)
+    uid = get_user_by_email(db, email).id
+    hid = _insert_paystub_for_ai(db, uid)
+    db.commit()
+
+    resp = client.post(
+        "/api/analytics/explain-paystub",
+        json={"holerite_id": hid, "question": "Por que o IRRF deste mês está alto?"},
+    )
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert isinstance(body.get("answer"), str) and body["answer"]
+
+
+def test_explain_paystub_endpoint_requires_ownership(client, register_user, login):
+    email_a = "pay_ai_owner@example.com"
+    register_user(email=email_a)
+    login(email=email_a)
+
+    # Holerite inexistente ou de OUTRO usuário => o guard de posse devolve 404
+    # (mesmo código `_load_holerite_or_404` usado por GET/DELETE).
+    resp = client.post(
+        "/api/analytics/explain-paystub",
+        json={"holerite_id": 999999, "question": "qual o total?"},
+    )
+    assert resp.status_code == 404
+
+
+def test_explain_paystub_endpoint_validation(client, register_user, login):
+    email = "pay_ai_val@example.com"
+    register_user(email=email)
+    login(email=email)
+
+    # Sem holerite_id -> 400.
+    resp = client.post(
+        "/api/analytics/explain-paystub", json={"question": "qual o total?"}
+    )
+    assert resp.status_code == 400
+
+    # Pergunta vazia -> 400.
+    resp = client.post(
+        "/api/analytics/explain-paystub", json={"holerite_id": 1, "question": "   "}
+    )
+    assert resp.status_code == 400
+
+
+
+def test_annual_projection_realized_plus_remaining():
+    profile = UserProfile(
+        user_id=1,
+        contract_type="MENSALISTA",
+        base_rate=3000.0,
+        irrf_dependents=0,
+        fixed_benefits_deduction=0.0,
+    )
+    hist = {
+        "monthly_net": 2500.0,
+        "realized_net_ytd": 7500.0,      # já recebido (ex.: Jan/Mar)
+        "realized_gross_ytd": 9000.0,
+        "remaining_months": 9,
+        "monthly_projected_net": 2500.0, # média mensal projetada
+        "avg_overtime_dsr": 0.0,
+        "ppr_avg": 0.0,
+    }
+    res = a.get_annual_financial_projection(profile, hist)
+
+    assert res["use_ytd_model"] is True
+    assert res["remaining_months"] == 9
+    assert res["remaining_projection_net"] == pytest.approx(2500.0 * 9)
+    assert res["realized_net_ytd"] == pytest.approx(7500.0)
+    assert res["realized_gross_ytd"] == pytest.approx(9000.0)
+    # total = realizado + projeção restante + 13º + férias.
+    assert res["total_annual_projected"] == pytest.approx(
+        7500.0 + 2500.0 * 9
+        + res["thirteenth"]["net_incl_ot"]
+        + res["vacation_bonus"]["net_incl_ot"]
+    )
+
+
+def test_annual_projection_ytd_model_off_when_no_remaining():
+    profile = UserProfile(
+        user_id=1,
+        contract_type="MENSALISTA",
+        base_rate=3000.0,
+        irrf_dependents=0,
+        fixed_benefits_deduction=0.0,
+    )
+    # Sem meses restantes (final do ano) -> modelo YTD desligado; projeção cai
+    # para o modelo de 12 meses (retrocompatível).
+    res = a.get_annual_financial_projection(
+        profile,
+        {
+            "monthly_net": 2500.0,
+            "realized_net_ytd": 30000.0,
+            "remaining_months": 0,
+            "monthly_projected_net": 2500.0,
+            "ppr_avg": 0.0,
+        },
+    )
+    assert res["use_ytd_model"] is False
+    assert res["remaining_projection_net"] == 0.0
+    assert res["total_annual_projected"] == res["total_annual_take_home_incl_ot"]
+
+
+def test_annual_projection_breakdown_returned(db, register_user, login):
+    profile = UserProfile(
+        user_id=1,
+        contract_type="MENSALISTA",
+        base_rate=3000.0,
+        irrf_dependents=0,
+        fixed_benefits_deduction=0.0,
+    )
+    res = a.get_annual_financial_projection(
+        profile,
+        {
+            "monthly_net": 2500.0,
+            "realized_net_ytd": 5000.0,
+            "realized_gross_ytd": 6000.0,
+            "remaining_months": 10,
+            "monthly_projected_net": 2500.0,
+            "ppr_avg": 0.0,
+        },
+    )
+    bd = res["total_projection_breakdown"]
+    assert bd["realized_net_ytd"] == res["realized_net_ytd"]
+    assert bd["remaining_projection_net"] == res["remaining_projection_net"]
+    assert bd["thirteenth_net_incl_ot"] == res["thirteenth"]["net_incl_ot"]
+    assert bd["vacation_net_incl_ot"] == res["vacation_bonus"]["net_incl_ot"]
+    assert bd["total_annual_projected"] == res["total_annual_projected"]
+    # total = realizado + restante + 13º + férias (sem duplicar os meses YTD).
+    assert bd["total_annual_projected"] == pytest.approx(
+        bd["realized_net_ytd"] + bd["remaining_projection_net"]
+        + bd["thirteenth_net_incl_ot"] + bd["vacation_net_incl_ot"]
+    )
+
+
+def test_get_realized_ytd_includes_advance_and_month_cutoff(db, register_user, login):
+    """Já recebido (YTD) soma o net REAL da competência (folha + adiantamento)
+    e NÃO conta competências futuras (mês > month_now)."""
+    import json as _json
+
+    from models.user import get_user_by_email
+
+    email = "realized_ytd@example.com"
+    register_user(email=email)
+    login(email=email)
+    uid = get_user_by_email(db, email).id
+
+    def ins(mes, doc, net, gross):
+        totals = _json.dumps(
+            {
+                "total_earnings": gross,
+                "total_deductions": round(max(gross - net, 0.0), 2),
+                "net_value": net,
+            }
+        )
+        db.execute(
+            "INSERT INTO holerites (user_id, company_name, mes_referencia, tipo_documento, totals) "
+            "VALUES (?, 'C', ?, ?, ?)",
+            [uid, mes, doc, totals],
+        )
+
+    ins("2026-01", "FOLHA_MENSAL", 4000.0, 5000.0)
+    ins("2026-01", "ADIANTAMENTO", 500.0, 600.0)   # adiantamento conta como recebido
+    ins("2026-03", "FOLHA_MENSAL", 8000.0, 9000.0)
+    ins("2026-06", "FOLHA_MENSAL", 9000.0, 10000.0)  # além de month_now=3 -> fora do YTD
+    db.commit()
+
+    res = a.get_realized_ytd(uid, year="2026", month_now=3)
+    assert res["net"] == pytest.approx(4000.0 + 500.0 + 8000.0)     # 12500 (folha+adv)
+    # GROSS NÃO soma o gross do adiantamento (offset /B02): só folhas (5000+9000).
+    assert res["gross"] == pytest.approx(5000.0 + 9000.0)            # 14000
+    assert res["months"] == 2
+    assert res["elapsed_months"] == 3
+
+
+def test_annual_projection_total_is_realized_plus_remaining_plus_bonuses():
+    profile = UserProfile(
+        user_id=1,
+        contract_type="MENSALISTA",
+        base_rate=3000.0,
+        irrf_dependents=0,
+        fixed_benefits_deduction=0.0,
+    )
+    res = a.get_annual_financial_projection(
+        profile,
+        {
+            "monthly_net": 2500.0,
+            "realized_net_ytd": 5000.0,
+            "realized_gross_ytd": 6000.0,
+            "remaining_months": 10,
+            "monthly_projected_net": 2500.0,
+            "ppr_avg": 500.0,  # PPR NÃO entra no total do modelo YTD
+        },
+    )
+    assert res["remaining_projection_net"] == pytest.approx(2500.0 * 10)
+    # total = Realizado + Restante + 13º + Férias (sem PPR / sem duplicar YTD).
+    assert res["total_annual_projected"] == pytest.approx(
+        5000.0 + 2500.0 * 10
+        + res["thirteenth"]["net_incl_ot"]
+        + res["vacation_bonus"]["net_incl_ot"]
+    )
+
+
+def test_realized_ytd_matches_period_totals_net(db, register_user, login):
+    """"Já recebido YTD" (ano completo) deve usar a MESMA lógica do KPI
+    "Total Líquido Recebido" (get_period_totals): com dados de um único ano até
+    dezembro, realized.net == period_totals.net (inclui adiantamento)."""
+    import json as _json
+
+    from models.user import get_user_by_email
+
+    email = "ytd_parity@example.com"
+    register_user(email=email)
+    login(email=email)
+    uid = get_user_by_email(db, email).id
+
+    def ins(mes, doc, net, gross):
+        totals = _json.dumps(
+            {
+                "total_earnings": gross,
+                "total_deductions": round(max(gross - net, 0.0), 2),
+                "net_value": net,
+            }
+        )
+        db.execute(
+            "INSERT INTO holerites (user_id, company_name, mes_referencia, tipo_documento, totals) "
+            "VALUES (?, 'C', ?, ?, ?)",
+            [uid, mes, doc, totals],
+        )
+
+    ins("2026-01", "FOLHA_MENSAL", 4000.0, 5000.0)
+    ins("2026-01", "ADIANTAMENTO", 700.0, 800.0)   # adiantamento entra no NET
+    ins("2026-02", "FOLHA_MENSAL", 4500.0, 5600.0)
+    ins("2026-02", "ADIANTAMENTO", 300.0, 400.0)
+    db.commit()
+
+    period = a.get_period_totals(uid)                      # sem filtro de mês
+    realized = a.get_realized_ytd(uid, year="2026", month_now=12)
+    # NET idêntico (folha vencedora + adiantamento).
+    assert realized["net"] == period["net"]
+    # GROSS também (só FOLHA; adiantamento nunca entra no gross).
+    assert realized["gross"] == period["gross"]
+    assert period["net"] == pytest.approx(4000.0 + 700.0 + 4500.0 + 300.0)
+    assert period["gross"] == pytest.approx(5000.0 + 5600.0)
+

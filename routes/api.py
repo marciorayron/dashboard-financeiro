@@ -419,6 +419,37 @@ def analytics_overtime_impact():
     )
 
 
+@api_bp.route("/analytics/overtime-reverse", methods=["GET"])
+@login_required
+def analytics_overtime_reverse():
+    """Simulador REVERSO de horas extras — LÍQUIDO no bolso.
+
+    Dado um alvo LÍQUIDO (R$) e uma alíquota (multiplicador 70%/100%), calcula
+    as horas extras necessárias por gross-up iterativo (INSS/IRRF marginais +
+    DSR) para que o usuário receba exatamente `net` na mão.
+
+    Query params:
+        * `net`  -> meta LÍQUIDA de H.E. (R$).
+        * `rate` -> multiplicador único da H.E. (1.7 = 70%, 2.0 = 100%).
+    """
+    from models.profile import load_profile
+
+    user_id = current_user_id()
+    db = get_db()
+    profile = load_profile(db, user_id)
+    try:
+        target_net = float(request.args.get("net", "0") or 0)
+    except ValueError:
+        target_net = 0.0
+    try:
+        rate = float(request.args.get("rate", "1.7") or 1.7)
+    except ValueError:
+        rate = 1.7
+    return jsonify(
+        analytics_service.calculate_reverse_overtime_net(profile, target_net, rate)
+    )
+
+
 @api_bp.route("/analytics/audit", methods=["GET"])
 @login_required
 def analytics_audit():
@@ -518,6 +549,89 @@ def analytics_ask_ai():
         answer = ai_ask_question(
             question,
             context=context,
+            api_key=current_app.config.get("DEEPSEEK_API_KEY"),
+            base_url=current_app.config.get("DEEPSEEK_BASE_URL"),
+        )
+        log_ai_usage(db, user_id)  # registra apenas chamadas válidas
+    except AIValidationError as exc:
+        if isinstance(exc, PromptInjectionError):
+            log_blocked_attempt(
+                db, user_id, "prompt_injection",
+                detail=(question or "")[:200],
+            )
+        return _limit_error_response(exc)
+
+    return jsonify({"answer": answer})
+
+
+@api_bp.route("/analytics/explain-paystub", methods=["POST"])
+@login_required
+def analytics_explain_paystub():
+    """
+    IA contextualizada para UM holerite específico (competência).
+
+    Corpo JSON: {"holerite_id": <int>, "question": "..."} (máx. 200 chars).
+    Valida posse do paystub (multi-tenant), monta o contexto daquela
+    competência (totais + rubricas + trecho bruto) e aplica o mesmo rate
+    limit/consumo dos demais endpoints de IA.
+
+    Returns:
+        JSON: {"answer": "..."}.
+    """
+    from services.ai_service import sanitize_query
+
+    user_id = current_user_id()
+    db = get_db()
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return jsonify({"error": "Corpo inválido.", "message": "Envie JSON."}), 400
+
+    try:
+        holerite_id = int(body.get("holerite_id"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "holerite_id_invalido", "message": "Informe um holerite_id válido."}), 400
+
+    question = str(body.get("question") or "").strip()
+    if not question:
+        return jsonify({"error": "pergunta_vazia", "message": "Digite uma pergunta sobre este holerite."}), 400
+
+    # Posse (isolamento multi-tenant): só o dono pode perguntar sobre o paystub.
+    row = _load_holerite_or_404(holerite_id, user_id)
+    if row is None:
+        return jsonify({"error": "Holerite não encontrado."}), 404
+
+    try:
+        # Valida tamanho/injeção ANTES de consumir tokens.
+        sanitize_query(question)
+        # Rate limiting (Freemium) antes de consumir tokens da IA.
+        enforce_ai_rate_limit(db, user_id)
+
+        rubricas = db.execute(
+            "SELECT codigo, descricao, tipo, valor FROM rubricas_holerite "
+            "WHERE holerite_id = ? AND user_id = ? ORDER BY id ASC",
+            [holerite_id, user_id],
+        ).fetchall()
+        line_items = []
+        for r in rubricas:
+            item = dict(r)
+            enforced = _catalog_enforced_tipo(db, r["codigo"])
+            item["tipo"] = enforced if enforced is not None else str(r["tipo"]).upper()
+            line_items.append(item)
+
+        paystub = {
+            "company_name": row["company_name"],
+            "mes_referencia": row["mes_referencia"],
+            "tipo_documento": row["tipo_documento"],
+            "totals": _json_loads(row["totals"]),
+            "line_items": line_items,
+            "raw_text": row["raw_text"],
+        }
+        # LGPD: remove PII residual antes de enviar à IA.
+        paystub = ai_service.anonymize_payload(paystub)
+
+        answer = ai_service.explain_paystub(
+            paystub,
+            question,
             api_key=current_app.config.get("DEEPSEEK_API_KEY"),
             base_url=current_app.config.get("DEEPSEEK_BASE_URL"),
         )
@@ -664,7 +778,35 @@ def analytics_projection():
                 continue
         ppr_avg = (sum(nets) / len(nets)) if nets else 0.0
 
-    historical = {"ppr_avg": ppr_avg}
+    # Médias históricas de H.E./DSR + alíquota efetiva de retenção (INSS+IRRF)
+    # para a projeção realista de 13º e férias (CLT) com horas extras.
+    ot_stats = analytics_service.get_paystub_ot_retention_stats(user_id)
+
+    # Modelo "Realizado + Meses Restantes" do ano corrente.
+    import datetime as _dt
+
+    today = _dt.date.today()
+    month_now = today.month
+    remaining_months = max(12 - month_now, 0)
+    realized = analytics_service.get_realized_ytd(user_id, str(today.year))
+    theo_net = 0.0
+    if profile is not None:
+        theo_net = analytics_service.theoretical_recurrent_net(profile)
+    monthly_projected_net = theo_net if theo_net > 0 else (
+        (realized["net"] / realized["months"]) if realized["months"] else 0.0
+    )
+
+    historical = {
+        "ppr_avg": ppr_avg,
+        "avg_overtime_dsr": ot_stats.get("avg_overtime_dsr") or 0.0,
+        "retention_rate": ot_stats.get("retention_rate") or 0.0,
+        "retention_has_data": bool(ot_stats.get("months") or 0) > 0,
+        "realized_net_ytd": realized.get("net") or 0.0,
+        "realized_gross_ytd": realized.get("gross") or 0.0,
+        "remaining_months": remaining_months,
+        "monthly_projected_net": monthly_projected_net,
+        "year": str(today.year),
+    }
     return jsonify(
         analytics_service.get_annual_financial_projection(profile, historical)
     )

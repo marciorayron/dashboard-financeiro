@@ -489,6 +489,81 @@ def explain_card(
     return answer
 
 
+def explain_paystub(
+    paystub: Optional[dict],
+    question: str,
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+) -> str:
+    """
+    Responde uma pergunta do usuário sobre UM holerite específico (competência).
+
+    Diferente de `ask_ai` (contexto geral mês a mês), aqui o contexto é
+    estritamente o paystub informado: competência, totais (bruto/líquido/
+    descontos), rubricas e um trecho do texto bruto. O prompt instrui o modelo
+    a NÃO extrapolar para outros meses.
+
+    Aplica `sanitize_query` (limite de 200 chars / anti-injeção) e
+    `anonymize_payload` (LGPD) antes de montar o prompt.
+    """
+    question = sanitize_query(str(question or ""))
+    base_url = base_url or os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+    api_key = _resolve_api_key(api_key)
+    paystub = anonymize_payload(paystub if isinstance(paystub, dict) else {})
+
+    comp = str(paystub.get("mes_referencia") or paystub.get("month") or "competência atual")
+    company = str(paystub.get("company_name") or "empresa")
+    totals = paystub.get("totals") or {}
+    gross = totals.get("total_earnings", 0)
+    deductions = totals.get("total_deductions", 0)
+    net = totals.get("net_value", 0)
+
+    rub_lines = []
+    for it in (paystub.get("line_items") or [])[:25]:
+        tipo = str(it.get("tipo") or "").upper()
+        natureza = "desconto" if tipo == "DESCONTO" else "provento"
+        rub_lines.append(
+            f"- {it.get('codigo', '?')} {it.get('descricao', '')} ({natureza}): "
+            f"R$ {it.get('valor', 0):,.2f}"
+        )
+    rub_txt = "\n".join(rub_lines) if rub_lines else "- (sem rubricas)"
+
+    raw_excerpt = str(paystub.get("raw_text") or "")[:600]
+
+    facts = (
+        f"Competência: {comp}. Empresa: {company}. Tipo: "
+        f"{paystub.get('tipo_documento') or 'holerite'}.\n"
+        f"Totais -> Proventos (bruto): R$ {gross:,.2f}; "
+        f"Descontos: R$ {deductions:,.2f}; Líquido: R$ {net:,.2f}.\n"
+        f"Rubricas:\n{rub_txt}\n"
+        f"Trecho do holerite:\n{raw_excerpt}"
+    )
+
+    messages = [
+        {"role": "system", "content": _MASTER_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                "Responda EXCLUSIVAMENTE sobre o holerite da competência "
+                f"informada ({comp}). Não extrapole para outros meses. Use "
+                "linguagem simples em português, cite valores com R$ e, se "
+                "explicar INSS/IRRF/horas extras, refira-se às rubricas deste "
+                "mês.\n\n"
+                f"{facts}\n\n"
+                f"Pergunta: {question}"
+            ),
+        },
+    ]
+    answer = _chat(messages, api_key, base_url)
+    if answer is None:
+        answer = (
+            "Não foi possível consultar o assistente neste momento. "
+            f"Revise os valores deste holerite ({comp}) no painel e, havendo "
+            "divergência, abra uma reclamação junto ao RH."
+        )
+    return answer
+
+
 # ---------------------------------------------------------------------
 # Governança de consumo (ai_usage_logs) & rate limiting
 # ---------------------------------------------------------------------
