@@ -576,3 +576,144 @@ body.privacy-mode canvas.chart-fill {
   white-space: nowrap;
 }
 
+
+/* =====================================================================
+   Admin Panel — Enterprise Sidebar Dashboard (refactor 2026)
+   ===================================================================== */
+.admin-body {
+  overflow-x: hidden;
+}
+
+/* Top header do painel admin (limpo). */
+.admin-body .app-navbar.admin-topbar {
+  margin-bottom: 0;
+}
+
+/* Layout em duas colunas: sidebar fixa (sticky) + conteúdo rolável. */
+.admin-layout {
+  display: flex;
+  flex: 1 0 auto;
+  width: 100%;
+  min-height: calc(100vh - 58px);
+}
+
+.admin-sidebar {
+  flex: 0 0 264px;
+  width: 264px;
+  background: var(--df-surface);
+  border-right: 1px solid var(--df-border);
+  padding: 1rem 0.85rem;
+  position: sticky;
+  top: 0;
+  align-self: flex-start;
+  height: 100vh;
+  overflow-y: auto;
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.admin-sidebar::-webkit-scrollbar { display: none; }
+
+.admin-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.admin-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  width: 100%;
+  text-align: left;
+  padding: 0.62rem 0.85rem;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--df-text);
+  font-weight: 500;
+  font-size: 0.92rem;
+  line-height: 1.25;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.admin-nav-item:hover {
+  background: rgba(59, 130, 246, 0.08);
+  color: #fff;
+}
+.admin-nav-item:focus-visible {
+  outline: 2px solid var(--df-primary);
+  outline-offset: -2px;
+}
+.admin-nav-item.active {
+  background: linear-gradient(90deg, rgba(59, 130, 246, 0.22), rgba(59, 130, 246, 0.08));
+  border-color: var(--df-primary);
+  color: #fff;
+}
+.admin-nav-icon {
+  width: 22px;
+  text-align: center;
+  font-size: 1.15rem;
+  flex-shrink: 0;
+}
+
+.admin-content {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 1.5rem 1.75rem;
+}
+
+.admin-pane-head {
+  margin-bottom: 1.1rem;
+}
+.admin-pane-title {
+  font-size: 1.4rem;
+  font-weight: 700;
+  margin-bottom: 0.15rem;
+}
+.admin-pane-subtitle {
+  color: var(--df-muted);
+  font-size: 0.92rem;
+  margin-bottom: 0;
+}
+
+
+/* Dropdowns de usuário e exportação no dashboard/header. */
+.user-menu,
+.export-menu {
+  min-width: 220px;
+}
+.export-menu .dropdown-item {
+  font-size: 0.92rem;
+}
+
+/* Responsivo: no mobile a sidebar vira barra horizontal rolável no topo. */
+@media (max-width: 991.98px) {
+  .admin-layout {
+    flex-direction: column;
+  }
+  .admin-sidebar {
+    flex: none;
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--df-border);
+    position: static;
+    height: auto;
+    padding: 0.6rem 0.75rem;
+  }
+  .admin-nav {
+    flex-direction: row;
+    overflow-x: auto;
+    gap: 0.4rem;
+    padding-bottom: 0.2rem;
+  }
+  .admin-nav-item {
+    flex: 0 0 auto;
+    white-space: nowrap;
+    width: auto;
+    padding: 0.5rem 0.8rem;
+  }
+  .admin-content {
+    padding: 1.15rem;
+  }
+}
+

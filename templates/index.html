@@ -10,48 +10,37 @@
 </head>
 <body class="app-body">
 
-  <!-- ======================= Navbar ======================= -->
+  <!-- ======================= Navbar (limpo) ======================= -->
   <nav class="navbar app-navbar mb-4 py-2">
-    <div class="container d-flex flex-column gap-2">
-      <!-- Linha superior: título + usuário/plano alinhados sem quebra feia -->
+    <div class="container">
       <div class="d-flex align-items-center justify-content-between gap-2 w-100">
         <a class="navbar-brand me-0 mb-0 text-nowrap" href="{{ url_for('main.dashboard') }}">
           <i class="bi bi-graph-up-arrow me-2"></i>Dashboard Financeiro
         </a>
         <div class="d-flex align-items-center gap-2 flex-shrink-0">
-          <span class="navbar-text small d-none d-md-inline mb-0">
-            <i class="bi bi-person-circle me-1"></i>{{ user_name }}
-          </span>
           {% if user_plan == 'pro' %}
-          <span class="badge text-bg-warning plan-badge text-nowrap" title="Plano Pró"><i class="bi bi-stars me-1"></i>Plano Pró ✨</span>
+          <span class="badge text-bg-warning plan-badge text-nowrap" title="Plano Pró"><i class="bi bi-stars me-1"></i>Pró ✨</span>
           {% else %}
-          <span class="badge text-bg-secondary plan-badge text-nowrap" title="Plano Gratuito">Plano Free</span>
+          <span class="badge text-bg-secondary plan-badge text-nowrap" title="Plano Gratuito">Free</span>
           {% endif %}
+          <div class="dropdown">
+            <button type="button" class="btn btn-sm btn-outline-light dropdown-toggle d-inline-flex align-items-center gap-1 user-menu-toggle"
+                    data-bs-toggle="dropdown" aria-expanded="false" aria-label="Menu do usuário">
+              <i class="bi bi-person-circle fs-5"></i>
+              <span class="d-none d-lg-inline">{{ user_name }}</span>
+            </button>
+            <ul class="dropdown-menu dropdown-menu-end user-menu">
+              <li><h6 class="dropdown-header"><i class="bi bi-person me-1"></i>{{ user_name }}</h6></li>
+              <li><button type="button" class="dropdown-item" data-bs-toggle="modal" data-bs-target="#profileModal">
+                <i class="bi bi-sliders me-2"></i>Perfil</button></li>
+              {% if is_admin %}
+              <li><a class="dropdown-item" href="{{ url_for('admin.index') }}"><i class="bi bi-speedometer2 me-2"></i>Administração</a></li>
+              {% endif %}
+              <li><hr class="dropdown-divider"></li>
+              <li><a class="dropdown-item text-danger" href="{{ url_for('auth.logout') }}"><i class="bi bi-box-arrow-right me-2"></i>Sair</a></li>
+            </ul>
+          </div>
         </div>
-      </div>
-      <!-- Linha de ações: rolagem horizontal no mobile, sem quebrar layout -->
-      <div class="app-navbar-actions d-flex align-items-center gap-2 flex-nowrap overflow-x-auto scrollbar-none py-1 w-100"
-           role="toolbar" aria-label="Ações do dashboard">
-        <button type="button" class="btn btn-sm btn-outline-primary text-nowrap flex-shrink-0" data-bs-toggle="modal" data-bs-target="#profileModal">
-          <i class="bi bi-sliders me-1"></i>Perfil
-        </button>
-        {% if is_admin %}
-        <a href="{{ url_for('admin.index') }}" class="btn btn-sm btn-outline-warning text-nowrap flex-shrink-0">
-          <i class="bi bi-speedometer2 me-1"></i>Admin
-        </a>
-        {% endif %}
-        <a href="/api/export/excel" class="btn btn-sm btn-outline-success text-nowrap flex-shrink-0">
-          <i class="bi bi-file-earmark-excel me-1"></i>Exportar XLSX
-        </a>
-        <a href="/api/export/csv" class="btn btn-sm btn-outline-secondary text-nowrap flex-shrink-0">
-          <i class="bi bi-filetype-csv me-1"></i>Exportar CSV
-        </a>
-        <a href="/api/reports/dossier-pdf" target="_blank" class="btn btn-sm btn-outline-success text-nowrap flex-shrink-0">
-          <i class="bi bi-file-earmark-pdf me-1"></i>Exportar Dossiê PDF
-        </a>
-        <a href="{{ url_for('auth.logout') }}" class="btn btn-sm btn-outline-danger text-nowrap flex-shrink-0">
-          <i class="bi bi-box-arrow-right me-1"></i>Sair
-        </a>
       </div>
     </div>
   </nav>
@@ -69,6 +58,19 @@
         <i class="bi bi-tags me-1"></i>🏷️ <span>Rótulos</span> <span class="lbl-state badge text-bg-info">ON</span>
       </button>
       <span class="text-secondary small ms-1" id="viewHint"></span>
+      <div class="dropdown ms-auto">
+        <button type="button" class="btn btn-sm btn-outline-success dropdown-toggle d-inline-flex align-items-center gap-1"
+                data-bs-toggle="dropdown" aria-expanded="false" aria-label="Exportar relatórios">
+          <i class="bi bi-download me-1"></i>Exportar Relatórios
+        </button>
+        <ul class="dropdown-menu dropdown-menu-end export-menu">
+          <li><h6 class="dropdown-header"><i class="bi bi-file-earmark me-1"></i>Formatos de exportação</h6></li>
+          <li><a class="dropdown-item" href="/api/export/excel"><i class="bi bi-file-earmark-excel me-2 text-success"></i>Exportar XLSX</a></li>
+          <li><a class="dropdown-item" href="/api/export/csv"><i class="bi bi-filetype-csv me-2 text-info"></i>Exportar CSV</a></li>
+          <li><hr class="dropdown-divider"></li>
+          <li><a class="dropdown-item" href="/api/reports/dossier-pdf" target="_blank" rel="noopener"><i class="bi bi-file-earmark-pdf me-2 text-danger"></i>Exportar Dossiê PDF</a></li>
+        </ul>
+      </div>
     </div>
 
     <!-- Mensagens flash -->

@@ -3,466 +3,525 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="dark" />
   <title>{{ title }} &middot; Dashboard Financeiro</title>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet" />
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
 </head>
-<body class="app-body">
+<body class="app-body admin-body">
 
-  <!-- ======================= Navbar ======================= -->
-  <nav class="navbar navbar-expand-lg app-navbar mb-4">
-    <div class="container">
-      <a class="navbar-brand" href="{{ url_for('admin.index') }}">
-        <i class="bi bi-speedometer2 me-2"></i>Administração
+  <!-- ======================= Top Header (limpo) ======================= -->
+  <nav class="navbar app-navbar admin-topbar py-2">
+    <div class="container-fluid px-3">
+      <a class="navbar-brand text-nowrap mb-0" href="{{ url_for('admin.index') }}">
+        <i class="bi bi-speedometer2 me-2"></i>Admin &middot; Dashboard Financeiro
       </a>
-      <div class="d-flex align-items-center gap-3">
-        <span class="navbar-text small d-none d-md-inline">
-          <i class="bi bi-person-circle me-1"></i>{{ user_name }} (admin)
-        </span>
-        <a href="{{ url_for('main.dashboard') }}" class="btn btn-sm btn-outline-secondary">
+      <div class="d-flex align-items-center gap-2 flex-shrink-0">
+        <a href="{{ url_for('main.dashboard') }}" class="btn btn-sm btn-outline-secondary text-nowrap">
           <i class="bi bi-graph-up-arrow me-1"></i>Dashboard
         </a>
-        <a href="{{ url_for('auth.logout') }}" class="btn btn-sm btn-outline-danger">
-          <i class="bi bi-box-arrow-right me-1"></i>Sair
-        </a>
+        <div class="dropdown">
+          <button type="button" class="btn btn-sm btn-outline-light dropdown-toggle d-inline-flex align-items-center gap-1"
+                  data-bs-toggle="dropdown" aria-expanded="false" aria-label="Menu do usuário admin">
+            <i class="bi bi-person-circle"></i>
+            <span class="d-none d-sm-inline">{{ user_name }}</span>
+            <span class="badge text-bg-warning">admin</span>
+          </button>
+          <ul class="dropdown-menu dropdown-menu-end">
+            <li><h6 class="dropdown-header"><i class="bi bi-person me-1"></i>{{ user_name }} (admin)</h6></li>
+            <li><a class="dropdown-item" href="{{ url_for('main.dashboard') }}"><i class="bi bi-graph-up-arrow me-2"></i>Dashboard</a></li>
+            <li><hr class="dropdown-divider"></li>
+            <li><a class="dropdown-item text-danger" href="{{ url_for('auth.logout') }}"><i class="bi bi-box-arrow-right me-2"></i>Sair</a></li>
+          </ul>
+        </div>
       </div>
     </div>
   </nav>
 
-  <main class="container pb-5">
-    <!-- Mensagens flash -->
-    {% with messages = get_flashed_messages(with_categories=true) %}
-      {% if messages %}
-        {% for category, message in messages %}
-          <div class="alert alert-{{ category }} alert-dismissible fade show py-2" role="alert">
-            {{ message }}
-            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Fechar"></button>
-          </div>
-        {% endfor %}
-      {% endif %}
-    {% endwith %}
+  <!-- ======================= Layout: Sidebar + Conteúdo ============== -->
+  <div class="admin-layout">
+    <aside class="admin-sidebar" aria-label="Navegação do painel administrativo">
+      <nav class="admin-nav">
+        <button type="button" class="admin-nav-item active" data-section="overview" aria-current="page">
+          <span class="admin-nav-icon" aria-hidden="true">📊</span>Visão Geral
+        </button>
+        <button type="button" class="admin-nav-item" data-section="users">
+          <span class="admin-nav-icon" aria-hidden="true">👥</span>Usuários &amp; Assinaturas
+        </button>
+        <button type="button" class="admin-nav-item" data-section="ai">
+          <span class="admin-nav-icon" aria-hidden="true">🤖</span>IA &amp; FinOps
+        </button>
+        <button type="button" class="admin-nav-item" data-section="system">
+          <span class="admin-nav-icon" aria-hidden="true">⚙️</span>Sistema &amp; Banco de Dados
+        </button>
+        <button type="button" class="admin-nav-item" data-section="taxes">
+          <span class="admin-nav-icon" aria-hidden="true">⚖️</span>Regras Fiscais &amp; Parâmetros
+        </button>
+        <button type="button" class="admin-nav-item" data-section="audit">
+          <span class="admin-nav-icon" aria-hidden="true">📈</span>Relatórios &amp; Auditoria
+        </button>
+      </nav>
+    </aside>
 
-    <!-- ======================= Barra de resumo (KPIs) ======================= -->
-    <div class="row g-3 mb-4" id="adminSummary">
-      <div class="col-6 col-lg-3">
-        <div class="card kpi-card h-100">
-          <div class="card-body">
-            <div class="kpi-title"><i class="bi bi-people me-1"></i>Total de Usuários</div>
-            <div class="kpi-value" id="kpiUsers">—</div>
-            <div class="kpi-subtitle text-secondary small" id="kpiPlanSplit">Free — · Pro —</div>
-          </div>
-        </div>
-      </div>
-      <div class="col-6 col-lg-3">
-        <div class="card kpi-card h-100">
-          <div class="card-body">
-            <div class="kpi-title"><i class="bi bi-files me-1"></i>Holerites Processados</div>
-            <div class="kpi-value" id="kpiPaystubs">—</div>
-            <div class="kpi-subtitle text-secondary small">docs processados no total</div>
-          </div>
-        </div>
-      </div>
-      <div class="col-6 col-lg-3">
-        <div class="card kpi-card h-100">
-          <div class="card-body">
-            <div class="kpi-title"><i class="bi bi-stars me-1"></i>Consultas IA (24h)</div>
-            <div class="kpi-value" id="kpiAiQueries">—</div>
-            <div class="kpi-subtitle text-secondary small" id="kpiAiCost">custo estimado —</div>
-          </div>
-        </div>
-      </div>
-      <div class="col-6 col-lg-3">
-        <div class="card kpi-card h-100">
-          <div class="card-body">
-            <div class="kpi-title"><i class="bi bi-hdd-stack me-1"></i>Armazenamento &amp; DB</div>
-            <div class="kpi-value" id="kpiStorage">—</div>
-            <div class="kpi-subtitle text-secondary small" id="kpiDbHealth">banco —</div>
-          </div>
-        </div>
-      </div>
-    </div>
+    <main class="admin-content" tabindex="-1">
+      <!-- Mensagens flash -->
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          {% for category, message in messages %}
+            <div class="alert alert-{{ category }} alert-dismissible fade show py-2" role="alert">
+              {{ message }}
+              <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Fechar"></button>
+            </div>
+          {% endfor %}
+        {% endif %}
+      {% endwith %}
 
-    <!-- ======================= Navegação por abas ======================= -->
-    <ul class="nav nav-tabs admin-tabs mb-3" id="adminTabs" role="tablist">
-      <li class="nav-item" role="presentation">
-        <button class="nav-link active" id="tab-users" data-bs-toggle="tab" data-bs-target="#pane-users" type="button" role="tab">
-          <i class="bi bi-people me-1"></i>Gestão de Usuários &amp; Assinaturas
-        </button>
-      </li>
-      <li class="nav-item" role="presentation">
-        <button class="nav-link" id="tab-ai" data-bs-toggle="tab" data-bs-target="#pane-ai" type="button" role="tab">
-          <i class="bi bi-stars me-1"></i>Consumo de IA &amp; FinOps
-        </button>
-      </li>
-      <li class="nav-item" role="presentation">
-        <button class="nav-link" id="tab-audit" data-bs-toggle="tab" data-bs-target="#pane-audit" type="button" role="tab">
-          <i class="bi bi-file-earmark-lock me-1"></i>Auditoria de Arquivos &amp; Parsing
-        </button>
-      </li>
-      <li class="nav-item" role="presentation">
-        <button class="nav-link" id="tab-config" data-bs-toggle="tab" data-bs-target="#pane-config" type="button" role="tab">
-          <i class="bi bi-gear me-1"></i>Configurações Globais
-        </button>
-      </li>
-    </ul>
-
-    <div class="tab-content" id="adminTabContent">
-      <!-- ============ Tab 1: Gestão de Usuários & Assinaturas ============ -->
-      <div class="tab-pane fade show active" id="pane-users" role="tabpanel">
-        <div class="card panel mb-4">
-          <div class="card-body">
-            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
-              <div class="panel-title"><i class="bi bi-people me-2"></i>Gestão de Usuários &amp; Assinaturas</div>
-              <div class="d-flex gap-2">
-                <button class="btn btn-sm btn-primary" onclick="Admin.openCreateUser()">
-                  <i class="bi bi-person-plus me-1"></i>Criar Novo Usuário
-                </button>
-                <button class="btn btn-sm btn-outline-secondary" onclick="Admin.loadUsers()">
-                  <i class="bi bi-arrow-clockwise me-1"></i>Atualizar
-                </button>
+      <!-- ============ a) VISÃO GERAL (KPIs) ============ -->
+      <section class="admin-pane" id="pane-overview" aria-label="Visão Geral">
+        <div class="admin-pane-head">
+          <h1 class="admin-pane-title">Visão Geral</h1>
+          <p class="admin-pane-subtitle">KPIs operacionais e de saúde do sistema.</p>
+        </div>
+        <div class="row g-3 mb-3">
+          <div class="col-6 col-xl-3">
+            <div class="card kpi-card h-100">
+              <div class="card-body">
+                <div class="kpi-title"><i class="bi bi-people me-1"></i>Total de Usuários</div>
+                <div class="kpi-value" id="kpiUsers">—</div>
+                <div class="kpi-subtitle text-secondary small" id="kpiPlanSplit">Free — · Pró —</div>
               </div>
             </div>
-
-            <!-- Filtros e busca -->
-            <div class="row g-2 mb-3">
-              <div class="col-md-4">
-                <input class="form-control form-control-sm" id="userSearch" placeholder="Buscar por nome ou e-mail..." aria-label="Buscar usuário" />
+          </div>
+          <div class="col-6 col-xl-3">
+            <div class="card kpi-card h-100">
+              <div class="card-body">
+                <div class="kpi-title"><i class="bi bi-files me-1"></i>Holerites Processados</div>
+                <div class="kpi-value" id="kpiPaystubs">—</div>
+                <div class="kpi-subtitle text-secondary small">docs processados no total</div>
               </div>
-              <div class="col-md-3">
-                <select class="form-select form-select-sm" id="planFilter" aria-label="Filtrar por plano">
-                  <option value="">Todos os planos</option>
-                  <option value="free">Plano Free</option>
-                  <option value="pro">Plano Pró</option>
+            </div>
+          </div>
+          <div class="col-6 col-xl-3">
+            <div class="card kpi-card h-100">
+              <div class="card-body">
+                <div class="kpi-title"><i class="bi bi-stars me-1"></i>Consultas IA (24h)</div>
+                <div class="kpi-value" id="kpiAiQueries">—</div>
+                <div class="kpi-subtitle text-secondary small" id="kpiAiCost">custo estimado —</div>
+              </div>
+            </div>
+          </div>
+          <div class="col-6 col-xl-3">
+            <div class="card kpi-card h-100">
+              <div class="card-body">
+                <div class="kpi-title"><i class="bi bi-hdd-stack me-1"></i>Armazenamento &amp; DB</div>
+                <div class="kpi-value" id="kpiStorage">—</div>
+                <div class="kpi-subtitle text-secondary small" id="kpiDbHealth">banco —</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card panel">
+          <div class="card-body">
+            <div class="panel-title small text-secondary mb-2">Atalhos</div>
+            <div class="d-flex flex-wrap gap-2">
+              <button type="button" class="btn btn-sm btn-outline-light" data-section="users"><span aria-hidden="true">👥</span> Gestão de Usuários</button>
+              <button type="button" class="btn btn-sm btn-outline-light" data-section="ai"><span aria-hidden="true">🤖</span> IA &amp; FinOps</button>
+              <button type="button" class="btn btn-sm btn-outline-light" data-section="system"><span aria-hidden="true">⚙️</span> Sistema &amp; Banco</button>
+              <button type="button" class="btn btn-sm btn-outline-light" data-section="taxes"><span aria-hidden="true">⚖️</span> Regras Fiscais</button>
+              <button type="button" class="btn btn-sm btn-outline-light" data-section="audit"><span aria-hidden="true">📈</span> Auditoria</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ b) USUÁRIOS & ASSINATURAS (CRM) ============ -->
+      <section class="admin-pane d-none" id="pane-users" aria-label="Usuários e Assinaturas">
+        <div class="admin-pane-head d-flex flex-wrap align-items-end justify-content-between gap-2">
+          <div>
+            <h1 class="admin-pane-title">Gestão de Usuários &amp; Assinaturas</h1>
+            <p class="admin-pane-subtitle mb-0">CRM: planos, quotas de IA e status das contas.</p>
+          </div>
+          <button type="button" class="btn btn-sm btn-primary" onclick="Admin.openCreateUser()">
+            <i class="bi bi-person-plus me-1"></i>Criar Usuário
+          </button>
+        </div>
+        <div class="card panel">
+          <div class="card-body">
+            <div class="row g-2 align-items-end mb-3">
+              <div class="col-md-4">
+                <label class="form-label small" for="userSearch">Buscar</label>
+                <input type="search" class="form-control form-control-sm" id="userSearch" placeholder="Nome ou e-mail…" autocomplete="off" />
+              </div>
+              <div class="col-6 col-md-3">
+                <label class="form-label small" for="planFilter">Plano</label>
+                <select class="form-select form-select-sm" id="planFilter">
+                  <option value="">Todos</option>
+                  <option value="free">Free</option>
+                  <option value="pro">Pró</option>
                 </select>
               </div>
-              <div class="col-md-2">
-                <select class="form-select form-select-sm" id="statusFilter" aria-label="Filtrar por status">
-                  <option value="">Todos os status</option>
+              <div class="col-6 col-md-3">
+                <label class="form-label small" for="statusFilter">Status</label>
+                <select class="form-select form-select-sm" id="statusFilter">
+                  <option value="">Todos</option>
                   <option value="1">Ativo</option>
                   <option value="0">Suspenso</option>
                 </select>
               </div>
+              <div class="col-md-2 text-md-end text-secondary small" id="usersCount"></div>
             </div>
-
             <div class="table-responsive">
-              <table class="table table-hover align-middle" id="usersTable">
+              <table class="table table-sm align-middle mb-0" id="usersTable">
                 <thead>
-                  <tr>
-                    <th>ID</th>
-                    <th>Nome</th>
-                    <th>E-mail</th>
-                    <th>Plano</th>
-                    <th>Holerites</th>
-                    <th>IA (24h/1h)</th>
-                    <th>Status</th>
-                    <th class="text-end">Ações</th>
-                  </tr>
+                  <tr><th>#</th><th>Nome</th><th>E-mail</th><th>Plano</th>
+                    <th class="text-end">Holerites</th><th class="text-end">IA 24h / 1h</th>
+                    <th>Status</th><th class="text-end">Ações</th></tr>
                 </thead>
                 <tbody></tbody>
               </table>
             </div>
-            <div class="small text-secondary" id="usersCount"></div>
           </div>
         </div>
-      </div>
+      </section>
 
-      <!-- ============ Tab 2: Consumo de IA & FinOps ============ -->
-      <div class="tab-pane fade" id="pane-ai" role="tabpanel">
+      <!-- ============ c) IA & FINOPS ============ -->
+      <section class="admin-pane d-none" id="pane-ai" aria-label="IA e FinOps">
+        <div class="admin-pane-head">
+          <h1 class="admin-pane-title">Configurações de IA &amp; FinOps</h1>
+          <p class="admin-pane-subtitle">Provedor, modelo ativo, precificação de tokens e logs de injeção.</p>
+        </div>
 
-        <!-- Configurador de provedor / modelo e tarifas -->
         <div class="card panel mb-3">
           <div class="card-body">
             <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
-              <div class="panel-title"><i class="bi bi-cpu me-2"></i>Provedor &amp; Precifica??o de Tokens (modelo-agn?stico)</div>
-              <button class="btn btn-sm btn-primary" onclick="Admin.saveAIConfig()">
-                <i class="bi bi-check-lg me-1"></i>Salvar configura??o
-              </button>
+              <h5 class="panel-title mb-0"><i class="bi bi-key me-2"></i>Provedor de IA</h5>
+              <span class="badge text-bg-secondary" id="aiProviderStatus">—</span>
             </div>
             <div class="row g-3 align-items-end">
-              <div class="col-md-4">
-                <label class="form-label small" for="aiModelName">Modelo ativo</label>
-                <input type="text" class="form-control form-control-sm" id="aiModelName" placeholder="deepseek-chat / gpt-4o-mini" />
+              <div class="col-12 col-md-5">
+                <label class="form-label small" for="aiProviderApiKey">API Key</label>
+                <input type="password" class="form-control form-control-sm" id="aiProviderApiKey"
+                       autocomplete="off" spellcheck="false" placeholder="sk-…" />
+                <div class="form-text small">A chave é mascarada. Deixe em branco para manter a atual.</div>
               </div>
-              <div class="col-md-4">
-                <label class="form-label small" for="aiInputRate">US$ / 1M tokens de Entrada</label>
-                <input type="number" step="0.0001" min="0" class="form-control form-control-sm" id="aiInputRate" />
+              <div class="col-12 col-md-4">
+                <label class="form-label small" for="aiProviderBaseUrl">Provider Base URL</label>
+                <input type="url" class="form-control form-control-sm" id="aiProviderBaseUrl"
+                       placeholder="https://api.deepseek.com" spellcheck="false" />
               </div>
-              <div class="col-md-4">
-                <label class="form-label small" for="aiOutputRate">US$ / 1M tokens de Sa?da</label>
-                <input type="number" step="0.0001" min="0" class="form-control form-control-sm" id="aiOutputRate" />
+              <div class="col-12 col-md-3">
+                <label class="form-label small" for="aiProviderModel">Modelo Ativo</label>
+                <input type="text" class="form-control form-control-sm" id="aiProviderModel" spellcheck="false" />
+              </div>
+              <div class="col-12 d-flex justify-content-end">
+                <button type="button" class="btn btn-sm btn-primary" onclick="Admin.saveProviderSettings()">
+                  <i class="bi bi-check-lg me-1"></i>Salvar Provedor
+                </button>
               </div>
             </div>
-            <div class="small text-secondary mt-2" id="aiConfigPreview">Defina modelo e tarifas para recalcular o custo estimado.</div>
           </div>
         </div>
 
-        <!-- KPIs FinOps -->
+        <div class="card panel mb-3">
+          <div class="card-body">
+            <h5 class="panel-title mb-1"><i class="bi bi-coin me-2"></i>Precificação de Tokens (FinOps)</h5>
+            <div class="row g-3 align-items-end mt-0">
+              <div class="col-12 col-md-6">
+                <label class="form-label small" for="aiModelName">Modelo (para custo)</label>
+                <input type="text" class="form-control form-control-sm" id="aiModelName" spellcheck="false" />
+              </div>
+              <div class="col-6 col-md-3">
+                <label class="form-label small" for="aiInputRate">Input (US$ / 1M)</label>
+                <input type="number" step="0.000001" min="0" class="form-control form-control-sm" id="aiInputRate" />
+              </div>
+              <div class="col-6 col-md-3">
+                <label class="form-label small" for="aiOutputRate">Output (US$ / 1M)</label>
+                <input type="number" step="0.000001" min="0" class="form-control form-control-sm" id="aiOutputRate" />
+              </div>
+            </div>
+            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-3">
+              <span class="text-secondary small" id="aiConfigPreview">Recálculo dinâmico: —</span>
+              <button type="button" class="btn btn-sm btn-primary" onclick="Admin.saveAIConfig()">
+                <i class="bi bi-check-lg me-1"></i>Salvar Tarifas
+              </button>
+            </div>
+          </div>
+        </div>
+
         <div class="row g-3 mb-3">
-          <div class="col-6 col-lg-2">
-            <div class="card kpi-card h-100"><div class="card-body"><div class="kpi-title">Consultas Totais</div><div class="kpi-value" id="aiTotal">?</div></div></div>
-          </div>
-          <div class="col-6 col-lg-2">
-            <div class="card kpi-card h-100"><div class="card-body"><div class="kpi-title">Modelo Ativo</div><div class="kpi-value small" id="aiModel">?</div></div></div>
-          </div>
-          <div class="col-6 col-lg-2">
-            <div class="card kpi-card h-100"><div class="card-body"><div class="kpi-title">Tokens Entrada</div><div class="kpi-value" id="aiInputTokens">?</div></div></div>
-          </div>
-          <div class="col-6 col-lg-2">
-            <div class="card kpi-card h-100"><div class="card-body"><div class="kpi-title">Tokens Sa?da</div><div class="kpi-value" id="aiOutputTokens">?</div></div></div>
-          </div>
-          <div class="col-6 col-lg-2">
-            <div class="card kpi-card h-100"><div class="card-body"><div class="kpi-title">Custo Estimado (US$)</div><div class="kpi-value" id="aiCost">?</div></div></div>
-          </div>
-          <div class="col-6 col-lg-2">
-            <div class="card kpi-card h-100"><div class="card-body"><div class="kpi-title">Inje??es Bloqueadas</div><div class="kpi-value danger" id="aiBlockedTotal">?</div></div></div>
-          </div>
+          <div class="col-6 col-xl-2"><div class="card kpi-card h-100"><div class="card-body"><div class="kpi-title">Consultas</div><div class="kpi-value" id="aiTotal">—</div></div></div></div>
+          <div class="col-6 col-xl-2"><div class="card kpi-card h-100"><div class="card-body"><div class="kpi-title">Modelo</div><div class="kpi-value fs-5" id="aiModel">—</div></div></div></div>
+          <div class="col-6 col-xl-2"><div class="card kpi-card h-100"><div class="card-body"><div class="kpi-title">Tokens in</div><div class="kpi-value" id="aiInputTokens">—</div></div></div></div>
+          <div class="col-6 col-xl-2"><div class="card kpi-card h-100"><div class="card-body"><div class="kpi-title">Tokens out</div><div class="kpi-value" id="aiOutputTokens">—</div></div></div></div>
+          <div class="col-6 col-xl-2"><div class="card kpi-card h-100"><div class="card-body"><div class="kpi-title">Custo est.</div><div class="kpi-value success" id="aiCost">—</div></div></div></div>
+          <div class="col-6 col-xl-2"><div class="card kpi-card h-100"><div class="card-body"><div class="kpi-title">Injeções bloqueadas</div><div class="kpi-value danger" id="aiBlockedTotal">—</div></div></div></div>
         </div>
 
-        <div class="row g-3">
-          <div class="col-lg-5">
-            <div class="card panel h-100">
-              <div class="card-body">
-                <div class="panel-title mb-3"><i class="bi bi-graph-up me-2"></i>Volume Di?rio (7 dias)</div>
-                <div class="table-responsive">
-                  <table class="table table-sm align-middle" id="aiDailyTable">
-                    <thead><tr><th>Data</th><th class="text-end">Consultas</th></tr></thead>
-                    <tbody></tbody>
-                  </table>
-                </div>
+        <div class="row g-3 mb-3">
+          <div class="col-lg-6">
+            <div class="card panel h-100"><div class="card-body">
+              <h5 class="panel-title mb-2"><i class="bi bi-calendar-week me-2"></i>Uso Diário</h5>
+              <div class="table-responsive" style="max-height:260px;overflow:auto">
+                <table class="table table-sm mb-0" id="aiDailyTable"><thead><tr><th>Data</th><th class="text-end">Consultas</th></tr></thead><tbody></tbody></table>
               </div>
-            </div>
+            </div></div>
           </div>
-          <div class="col-lg-7">
-            <div class="card panel h-100">
-              <div class="card-body">
-                <div class="panel-title mb-3"><i class="bi bi-trophy me-2"></i>Heavy-User Leaderboard</div>
-                <div class="table-responsive">
-                  <table class="table table-sm align-middle" id="aiLeaderboardTable">
-                    <thead><tr><th>#</th><th>Usu?rio</th><th>Plano</th><th class="text-end">Consultas</th></tr></thead>
-                    <tbody></tbody>
-                  </table>
-                </div>
+          <div class="col-lg-6">
+            <div class="card panel h-100"><div class="card-body">
+              <h5 class="panel-title mb-2"><i class="bi bi-trophy me-2"></i>Leaderboard de Consumo</h5>
+              <div class="table-responsive" style="max-height:260px;overflow:auto">
+                <table class="table table-sm mb-0" id="aiLeaderboardTable"><thead><tr><th>#</th><th>Usuário</th><th>Plano</th><th class="text-end">Consultas</th></tr></thead><tbody></tbody></table>
               </div>
-            </div>
+            </div></div>
           </div>
         </div>
 
-        <div class="card panel mt-3">
+        <div class="card panel">
           <div class="card-body">
-            <div class="panel-title mb-3"><i class="bi bi-shield-exclamation me-2"></i>Log de Inje??es Bloqueadas (Prompt Injection)</div>
-            <div class="table-responsive">
-              <table class="table table-sm table-hover align-middle" id="aiBlockedTable">
-                <thead><tr><th>Data</th><th>Usu?rio</th><th>Motivo</th><th>Detalhe</th></tr></thead>
-                <tbody></tbody>
-              </table>
+            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
+              <h5 class="panel-title mb-0"><i class="bi bi-shield-shaded me-2"></i>Logs de Injeção (Prompt Injection)</h5>
+              <span class="text-secondary small" id="aiBlockedNote"></span>
             </div>
-            <div class="small text-secondary mt-1" id="aiBlockedNote"></div>
-          </div>
-        </div>
-      </div>
-
-<!-- ============ Tab 3: Auditoria de Arquivos & Parsing ============ -->
-      <div class="tab-pane fade" id="pane-audit" role="tabpanel">
-        <div class="card panel mb-4">
-          <div class="card-body">
-            <div class="d-flex align-items-center justify-content-between mb-3">
-              <div class="panel-title"><i class="bi bi-file-earmark-lock me-2"></i>Erros de Parsing (PDFs)</div>
-              <button class="btn btn-sm btn-outline-secondary" onclick="Admin.loadErrors()">
-                <i class="bi bi-arrow-clockwise me-1"></i>Atualizar
-              </button>
-            </div>
-            <div id="parseErrorsEmpty" class="text-center text-secondary small py-4 d-none">
-              <i class="bi bi-check-circle text-success me-1"></i>Nenhum erro de parsing pendente.
-            </div>
-            <div class="table-responsive">
-              <table class="table table-sm table-hover align-middle d-none" id="parseErrorsTable">
-                <thead>
-                  <tr>
-                    <th>Data</th>
-                    <th>Usuário</th>
-                    <th>Arquivo</th>
-                    <th>Erro</th>
-                    <th>Detalhes</th>
-                    <th></th>
-                  </tr>
-                </thead>
+            <div class="table-responsive mt-2">
+              <table class="table table-sm mb-0" id="aiBlockedTable">
+                <thead><tr><th>Quando</th><th>Usuário</th><th>Motivo</th><th>Detalhe</th></tr></thead>
                 <tbody></tbody>
               </table>
             </div>
           </div>
         </div>
+      </section>
 
-        <div class="card panel mb-4">
-          <div class="card-body">
-            <div class="d-flex align-items-center justify-content-between mb-3">
-              <div class="panel-title"><i class="bi bi-hdd-stack me-2"></i>Gestão de Armazenamento</div>
-              <div class="d-flex gap-2">
-                <button class="btn btn-sm btn-outline-secondary" onclick="Admin.loadStorage()">
-                  <i class="bi bi-arrow-clockwise me-1"></i>Atualizar
-                </button>
-                <button class="btn btn-sm btn-outline-danger" onclick="Admin.cleanupStorage()">
-                  <i class="bi bi-trash me-1"></i>Limpar órfãos
-                </button>
-              </div>
-            </div>
-            <div class="row g-3 mb-3">
-              <div class="col-md-6">
-                <div class="border rounded p-2 text-center">
-                  <div class="small text-secondary">Uso Total</div>
-                  <div class="fw-bold" id="storageTotal">—</div>
-                </div>
-              </div>
-              <div class="col-md-6">
-                <div class="border rounded p-2 text-center">
-                  <div class="small text-secondary">Arquivos</div>
-                  <div class="fw-bold" id="storageFiles">—</div>
-                </div>
-              </div>
-            </div>
-            <div class="table-responsive">
-              <table class="table table-sm table-hover align-middle" id="storageTable">
-                <thead><tr><th>Caminho</th><th class="text-end">Tamanho</th></tr></thead>
-                <tbody></tbody>
-              </table>
-            </div>
-          </div>
+      <!-- ============ d) SISTEMA & BANCO DE DADOS ============ -->
+      <section class="admin-pane d-none" id="pane-system" aria-label="Sistema e Banco de Dados">
+        <div class="admin-pane-head">
+          <h1 class="admin-pane-title">Sistema &amp; Banco de Dados</h1>
+          <p class="admin-pane-subtitle">Caminhos de storage, saúde do banco e armazenamento em disco.</p>
         </div>
-      </div>
 
-      <!-- ============ Tab 4: Configurações Globais ============ -->
-      <div class="tab-pane fade" id="pane-config" role="tabpanel">
-        <!-- Limites Freemium -->
-        <div class="card panel mb-4">
+        <div class="card panel mb-3">
           <div class="card-body">
-            <div class="panel-title mb-3"><i class="bi bi-toggles me-2"></i>Limites Freemium (dinâmicos)</div>
+            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+              <h5 class="panel-title mb-0"><i class="bi bi-gear me-2"></i>Caminhos de Sistema</h5>
+              <span class="text-secondary small" id="sysPendingNote"></span>
+            </div>
             <div class="row g-3 align-items-end">
-              <div class="col-md-4">
-                <label class="form-label small" for="ffPaystubLimit">Holerites no plano Gratuito</label>
-                <input type="number" min="0" class="form-control form-control-sm" id="ffPaystubLimit" />
+              <div class="col-12 col-md-6">
+                <label class="form-label small" for="sysDbPath">DATABASE_PATH (somente leitura)</label>
+                <div class="input-group input-group-sm">
+                  <input type="text" class="form-control" id="sysDbPath" readonly spellcheck="false" />
+                  <span class="input-group-text"><span class="badge text-bg-secondary" id="sysDbStatus">—</span></span>
+                </div>
+                <div class="form-text small">Tamanho do arquivo: <strong id="sysDbSize">—</strong>. Alteração exige reinício.</div>
               </div>
-              <div class="col-md-4">
-                <label class="form-label small" for="ffFreeAiDaily">Consultas IA / 24h (Free)</label>
-                <input type="number" min="0" class="form-control form-control-sm" id="ffFreeAiDaily" />
+              <div class="col-12 col-md-6">
+                <label class="form-label small" for="sysUploadFolder">UPLOAD_FOLDER (aplicado em tempo real)</label>
+                <input type="text" class="form-control form-control-sm" id="sysUploadFolder" spellcheck="false" />
+                <div class="form-text small" id="sysUploadNote"></div>
               </div>
-              <div class="col-md-4">
-                <label class="form-label small" for="ffProAiHourly">Consultas IA / 1h (Pro)</label>
-                <input type="number" min="0" class="form-control form-control-sm" id="ffProAiHourly" />
+              <div class="col-12 d-flex justify-content-end">
+                <button type="button" class="btn btn-sm btn-primary" onclick="Admin.saveSystemSettings()">
+                  <i class="bi bi-check-lg me-1"></i>Salvar Caminhos
+                </button>
               </div>
             </div>
-            <div class="mt-3">
-              <button class="btn btn-sm btn-primary" onclick="Admin.saveFreemiumLimits()">
-                <i class="bi bi-check-lg me-1"></i>Salvar limites
+          </div>
+        </div>
+
+        <div class="card panel mb-3">
+          <div class="card-body">
+            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+              <h5 class="panel-title mb-0"><i class="bi bi-hdd me-2"></i>Armazenamento</h5>
+              <div class="d-flex align-items-center gap-3 small">
+                <span>Total: <strong id="storageTotal">—</strong></span>
+                <span>Arquivos: <strong id="storageFiles">—</strong></span>
+                <button type="button" class="btn btn-sm btn-outline-danger" onclick="Admin.cleanupStorage()">
+                  <i class="bi bi-trash3 me-1"></i>Limpar Órfãos
+                </button>
+              </div>
+            </div>
+            <div class="table-responsive" style="max-height:340px;overflow:auto">
+              <table class="table table-sm mb-0" id="storageTable">
+                <thead><tr><th>Arquivo</th><th class="text-end">Tamanho</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ e) REGRAS FISCAIS & PARÂMETROS ============ -->
+      <section class="admin-pane d-none" id="pane-taxes" aria-label="Regras Fiscais e Parâmetros">
+        <div class="admin-pane-head">
+          <h1 class="admin-pane-title">Regras Fiscais &amp; Parâmetros</h1>
+          <p class="admin-pane-subtitle">Faixas de INSS/IRRF, dependentes, catálogo de rubricas e limites.</p>
+        </div>
+
+        <div class="row g-3 mb-3">
+          <div class="col-lg-6">
+            <div class="card panel h-100"><div class="card-body">
+              <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
+                <h5 class="panel-title mb-0"><i class="bi bi-cash-stack me-2"></i>Faixas de INSS</h5>
+                <button type="button" class="btn btn-sm btn-outline-success" onclick="Admin.addRow('inss')"><i class="bi bi-plus-lg me-1"></i>Adicionar</button>
+              </div>
+              <div class="row g-2 mb-2 small text-secondary fw-semibold px-1">
+                <div class="col-4">Teto (R$)</div><div class="col-4">Alíquota</div><div class="col-3">Dedução</div><div class="col-1"></div>
+              </div>
+              <div id="inssEditor"></div>
+            </div></div>
+          </div>
+          <div class="col-lg-6">
+            <div class="card panel h-100"><div class="card-body">
+              <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
+                <h5 class="panel-title mb-0"><i class="bi bi-percent me-2"></i>Faixas de IRRF</h5>
+                <button type="button" class="btn btn-sm btn-outline-success" onclick="Admin.addRow('irrf')"><i class="bi bi-plus-lg me-1"></i>Adicionar</button>
+              </div>
+              <div class="row g-2 mb-2 small text-secondary fw-semibold px-1">
+                <div class="col-4">Teto (R$)</div><div class="col-4">Alíquota</div><div class="col-3">Dedução</div><div class="col-1"></div>
+              </div>
+              <div id="irrfEditor"></div>
+            </div></div>
+          </div>
+        </div>
+
+        <div class="card panel mb-3">
+          <div class="card-body">
+            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
+              <div class="col-12 col-md-4">
+                <label class="form-label small" for="dependentDeduction">Dedução por dependente (IRRF, R$)</label>
+                <input type="number" step="0.01" min="0" class="form-control form-control-sm" id="dependentDeduction" />
+              </div>
+              <button type="button" class="btn btn-sm btn-primary" onclick="Admin.saveTaxes()">
+                <i class="bi bi-check-lg me-1"></i>Salvar Faixas Fiscais
               </button>
             </div>
           </div>
         </div>
 
-        <!-- Impostos & Rubricas -->
-        <div class="card panel mb-4">
-          <div class="card-body">
-            <div class="panel-title mb-3"><i class="bi bi-calculator me-2"></i>Regras Fiscais</div>
-            <ul class="nav nav-tabs mb-3" id="settingsTabs" role="tablist">
-              <li class="nav-item" role="presentation">
-                <button class="nav-link active" id="tab-taxes" data-bs-toggle="tab" data-bs-target="#pane-taxes" type="button" role="tab">Faixas de INSS/IRRF</button>
-              </li>
-              <li class="nav-item" role="presentation">
-                <button class="nav-link" id="tab-catalog" data-bs-toggle="tab" data-bs-target="#pane-catalog" type="button" role="tab">Rubricas Padrão</button>
-              </li>
-            </ul>
-
-            <div class="tab-content" id="settingsTabContent">
-              <div class="tab-pane fade show active" id="pane-taxes" role="tabpanel">
-                <div class="row g-4">
-                  <div class="col-lg-6">
-                    <div class="panel-title small text-secondary mb-2">INSS Progressivo</div>
-                    <div id="inssEditor" class="mb-2"></div>
-                    <button class="btn btn-sm btn-outline-primary" onclick="Admin.addRow('inss')">
-                      <i class="bi bi-plus-lg me-1"></i>Adicionar faixa
-                    </button>
-                  </div>
-                  <div class="col-lg-6">
-                    <div class="panel-title small text-secondary mb-2">IRRF Progressivo</div>
-                    <div id="irrfEditor" class="mb-2"></div>
-                    <button class="btn btn-sm btn-outline-primary" onclick="Admin.addRow('irrf')">
-                      <i class="bi bi-plus-lg me-1"></i>Adicionar faixa
-                    </button>
-                  </div>
+        <div class="row g-3 mb-3">
+          <div class="col-lg-7">
+            <div class="card panel h-100"><div class="card-body">
+              <h5 class="panel-title mb-2"><i class="bi bi-journal-code me-2"></i>Catálogo de Rubricas</h5>
+              <div class="row g-2 mb-2">
+                <div class="col-6 col-md-3">
+                  <label class="form-label small" for="catCodigo">Código</label>
+                  <input type="text" class="form-control form-control-sm" id="catCodigo" placeholder="Ex.: B01" spellcheck="false" />
                 </div>
-                <div class="mt-3 d-flex align-items-center gap-3 flex-wrap">
-                  <label class="form-label mb-0">
-                    Dedução por dependente (R$):
-                    <input type="number" step="0.01" min="0" class="form-control form-control-sm d-inline-block w-auto" id="dependentDeduction" />
-                  </label>
-                  <button class="btn btn-sm btn-primary ms-auto" onclick="Admin.saveTaxes()">
-                    <i class="bi bi-check-lg me-1"></i>Salvar faixas
-                  </button>
+                <div class="col-12 col-md-5">
+                  <label class="form-label small" for="catDescricao">Descrição</label>
+                  <input type="text" class="form-control form-control-sm" id="catDescricao" placeholder="Descrição da rubrica…" />
+                </div>
+                <div class="col-6 col-md-2">
+                  <label class="form-label small" for="catTipo">Tipo</label>
+                  <select class="form-select form-select-sm" id="catTipo">
+                    <option value="PROVENTO">Provento</option>
+                    <option value="DESCONTO">Desconto</option>
+                  </select>
+                </div>
+                <div class="col-12 col-md-2 d-flex align-items-end">
+                  <button type="button" class="btn btn-sm btn-primary w-100" onclick="Admin.addCatalog()"><i class="bi bi-plus-lg"></i></button>
                 </div>
               </div>
-
-              <div class="tab-pane fade" id="pane-catalog" role="tabpanel">
-                <div class="row g-2 mb-3">
-                  <div class="col-md-3"><input class="form-control form-control-sm" id="catCodigo" placeholder="Código (ex.: 9999)" /></div>
-                  <div class="col-md-5"><input class="form-control form-control-sm" id="catDescricao" placeholder="Descrição" /></div>
-                  <div class="col-md-2">
-                    <select class="form-select form-select-sm" id="catTipo">
-                      <option value="PROVENTO">PROVENTO</option>
-                      <option value="DESCONTO">DESCONTO</option>
-                    </select>
-                  </div>
-                  <div class="col-md-2 d-grid">
-                    <button class="btn btn-sm btn-primary" onclick="Admin.addCatalog()">
-                      <i class="bi bi-plus-lg me-1"></i>Adicionar
-                    </button>
-                  </div>
-                </div>
-                <div class="table-responsive">
-                  <table class="table table-sm table-hover" id="catalogTable">
-                    <thead><tr><th>Código</th><th>Descrição</th><th>Tipo</th><th></th></tr></thead>
-                    <tbody></tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Histórico de revisões -->
-        <div class="card panel mb-4">
-          <div class="card-body">
-            <div class="panel-title mb-3"><i class="bi bi-clock-history me-2"></i>Validação do Histórico de Perfil</div>
-            <div class="row g-2 align-items-end">
-              <div class="col-md-4">
-                <label class="form-label small">Usuário</label>
-                <select class="form-select form-select-sm" id="histUser"></select>
-              </div>
-              <div class="col-md-4">
-                <label class="form-label small">Competência (YYYY-MM)</label>
-                <input class="form-control form-control-sm" id="histMes" placeholder="2024-06" />
-              </div>
-              <div class="col-md-4 d-grid">
-                <button class="btn btn-sm btn-outline-primary" onclick="Admin.checkHistory()">
-                  <i class="bi bi-search me-1"></i>Avaliar taxa ativa
-                </button>
-              </div>
-            </div>
-            <div id="histResult" class="mt-3 small text-secondary"></div>
-            <div id="histTableWrap" class="mt-2 d-none">
-              <div class="panel-title small text-secondary mb-1">Revisões registradas</div>
-              <div class="table-responsive">
-                <table class="table table-sm" id="histTable">
-                  <thead><tr><th>Vigência</th><th>Cargo</th><th>Contrato</th><th>Taxa</th><th>Horas</th></tr></thead>
+              <div class="table-responsive" style="max-height:280px;overflow:auto">
+                <table class="table table-sm mb-0" id="catalogTable">
+                  <thead><tr><th>Código</th><th>Descrição</th><th>Tipo</th><th class="text-end">Ação</th></tr></thead>
                   <tbody></tbody>
                 </table>
               </div>
+            </div></div>
+          </div>
+          <div class="col-lg-5">
+            <div class="card panel mb-3"><div class="card-body">
+              <h5 class="panel-title mb-2"><i class="bi bi-stars me-2"></i>Limites Freemium</h5>
+              <div class="row g-3 align-items-end">
+                <div class="col-12">
+                  <label class="form-label small" for="ffPaystubLimit">Holerites máx. (Free)</label>
+                  <input type="number" min="0" class="form-control form-control-sm" id="ffPaystubLimit" />
+                </div>
+                <div class="col-12">
+                  <label class="form-label small" for="ffFreeAiDaily">Consultas IA/dia (Free)</label>
+                  <input type="number" min="0" class="form-control form-control-sm" id="ffFreeAiDaily" />
+                </div>
+                <div class="col-12">
+                  <label class="form-label small" for="ffProAiHourly">Consultas IA/hora (Pró)</label>
+                  <input type="number" min="0" class="form-control form-control-sm" id="ffProAiHourly" />
+                </div>
+                <div class="col-12 text-end">
+                  <button type="button" class="btn btn-sm btn-primary" onclick="Admin.saveFreemiumLimits()">
+                    <i class="bi bi-check-lg me-1"></i>Salvar Limites
+                  </button>
+                </div>
+              </div>
+            </div></div>
+            <div class="card panel"><div class="card-body">
+              <h5 class="panel-title mb-2"><i class="bi bi-clock-history me-2"></i>Validação de Histórico</h5>
+              <div class="row g-2 align-items-end">
+                <div class="col-12">
+                  <label class="form-label small" for="histUser">Usuário</label>
+                  <select class="form-select form-select-sm" id="histUser"></select>
+                </div>
+                <div class="col-12">
+                  <label class="form-label small" for="histMes">Competência (AAAA-MM)</label>
+                  <input type="month" class="form-control form-control-sm" id="histMes" />
+                </div>
+                <div class="col-12 text-end">
+                  <button type="button" class="btn btn-sm btn-outline-info" onclick="Admin.checkHistory()">
+                    <i class="bi bi-search me-1"></i>Calcular Líquido
+                  </button>
+                </div>
+              </div>
+              <div class="text-secondary small mt-2" id="histResult"></div>
+              <div class="mt-2 d-none" id="histTableWrap">
+                <div class="table-responsive">
+                  <table class="table table-sm mb-0" id="histTable">
+                    <thead><tr><th>Vigência</th><th>Cargo</th><th>Contrato</th><th>Taxa</th><th>Horas</th></tr></thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+              </div>
+            </div></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ f) RELATÓRIOS & AUDITORIA ============ -->
+      <section class="admin-pane d-none" id="pane-audit" aria-label="Relatórios e Auditoria">
+        <div class="admin-pane-head">
+          <h1 class="admin-pane-title">Relatórios &amp; Auditoria</h1>
+          <p class="admin-pane-subtitle">Erros do sistema, logs de parsing e relatórios operacionais.</p>
+        </div>
+
+        <div class="card panel mb-3">
+          <div class="card-body">
+            <h5 class="panel-title mb-1"><i class="bi bi-bug me-2"></i>Erros de Parsing (uploads quebrados)</h5>
+            <p class="text-secondary small mt-0" id="parseErrorsEmpty">Sem erros não resolvidos. 🎉</p>
+            <div class="table-responsive mt-2 d-none" id="parseErrorsTable">
+              <table class="table table-sm mb-0">
+                <thead><tr><th>Quando</th><th>Usuário</th><th>Arquivo</th><th>Erro</th><th>Traceback</th><th class="text-end">Ação</th></tr></thead>
+                <tbody></tbody>
+              </table>
             </div>
           </div>
         </div>
-      </div>
-    </div><!-- /.tab-content -->
-  </main>
 
-  <!-- Modal: Criar Novo Usuário -->
+        <div class="card panel">
+          <div class="card-body">
+            <h5 class="panel-title mb-2"><i class="bi bi-file-earmark-bar-graph me-2"></i>Relatórios do Sistema</h5>
+            <p class="text-secondary small">Os relatórios em PDF são gerados por usuário na área do dashboard. Aqui você acompanha a saúde do parsing e os registros de auditoria registrados acima.</p>
+            <ul class="small text-secondary mb-0">
+              <li><i class="bi bi-file-earmark-pdf me-1"></i><strong>Dossiê de capacidade financeira</strong> (<code>/api/reports/dossier-pdf</code>) — por usuário, no dashboard.</li>
+              <li><i class="bi bi-file-earmark-pdf me-1"></i><strong>Relatório de disputa</strong> (<code>/api/reports/dispute-pdf</code>) — exportado por holerite no dashboard.</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div><!-- /.admin-layout -->
+
+  <!-- ======================= Modal: Criar Novo Usuário =============== -->
   <div class="modal fade" id="createUserModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-dialog-centered">
       <div class="modal-content panel">
@@ -471,36 +530,34 @@
           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fechar"></button>
         </div>
         <div class="modal-body">
-          <form id="createUserForm">
-            <div class="row g-3">
-              <div class="col-md-6">
-                <label class="form-label small" for="cuName">Nome</label>
-                <input type="text" class="form-control form-control-sm" id="cuName" required />
-              </div>
-              <div class="col-md-6">
-                <label class="form-label small" for="cuEmail">E-mail</label>
-                <input type="email" class="form-control form-control-sm" id="cuEmail" required />
-              </div>
-              <div class="col-md-6">
-                <label class="form-label small" for="cuPassword">Senha</label>
-                <input type="password" class="form-control form-control-sm" id="cuPassword" minlength="6" required />
-              </div>
-              <div class="col-md-3">
-                <label class="form-label small" for="cuRole">Papel</label>
-                <select class="form-select form-select-sm" id="cuRole">
-                  <option value="user">user</option>
-                  <option value="admin">admin</option>
-                </select>
-              </div>
-              <div class="col-md-3">
-                <label class="form-label small" for="cuPlan">Plano</label>
-                <select class="form-select form-select-sm" id="cuPlan">
-                  <option value="free">Free</option>
-                  <option value="pro">Pró</option>
-                </select>
-              </div>
+          <div class="row g-3">
+            <div class="col-md-6">
+              <label class="form-label small" for="cuName">Nome</label>
+              <input type="text" class="form-control form-control-sm" id="cuName" autocomplete="off" />
             </div>
-          </form>
+            <div class="col-md-6">
+              <label class="form-label small" for="cuEmail">E-mail</label>
+              <input type="email" class="form-control form-control-sm" id="cuEmail" autocomplete="off" />
+            </div>
+            <div class="col-md-6">
+              <label class="form-label small" for="cuPassword">Senha</label>
+              <input type="password" class="form-control form-control-sm" id="cuPassword" minlength="6" autocomplete="new-password" />
+            </div>
+            <div class="col-6 col-md-3">
+              <label class="form-label small" for="cuRole">Papel</label>
+              <select class="form-select form-select-sm" id="cuRole">
+                <option value="user">user</option>
+                <option value="admin">admin</option>
+              </select>
+            </div>
+            <div class="col-6 col-md-3">
+              <label class="form-label small" for="cuPlan">Plano</label>
+              <select class="form-select form-select-sm" id="cuPlan">
+                <option value="free">Free</option>
+                <option value="pro">Pró</option>
+              </select>
+            </div>
+          </div>
         </div>
         <div class="modal-footer border-secondary-subtle">
           <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Cancelar</button>
@@ -514,7 +571,7 @@
 
   <!-- Toast -->
   <div class="toast-container position-fixed bottom-0 end-0 p-3">
-    <div id="adminToast" class="toast align-items-center text-bg-success border-0" role="alert">
+    <div id="adminToast" class="toast align-items-center text-bg-success border-0" role="alert" aria-live="polite" aria-atomic="true">
       <div class="d-flex">
         <div class="toast-body" id="adminToastMsg"></div>
         <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Fechar"></button>
@@ -527,3 +584,13 @@
   <script src="{{ url_for('static', filename='js/admin.js') }}"></script>
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+

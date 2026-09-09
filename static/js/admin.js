@@ -649,6 +649,107 @@ const Admin = (function () {
       " + " + formatNumber(aiUsageState.output_tokens) + " tokens output × " + rateOut + " / 1M)";
   }
 
+  // Navegação por sidebar (dashboard Enterprise) -----------------------
+  function showSection(name) {
+    document.querySelectorAll(".admin-pane").forEach(function (p) {
+      p.classList.add("d-none");
+    });
+    const target = document.getElementById("pane-" + name);
+    if (target) target.classList.remove("d-none");
+    document.querySelectorAll(".admin-sidebar [data-section]").forEach(function (b) {
+      const on = b.getAttribute("data-section") === name;
+      b.classList.toggle("active", on);
+      if (on) b.setAttribute("aria-current", "page");
+      else b.removeAttribute("aria-current");
+    });
+  }
+
+  function wireNav() {
+    document.querySelectorAll("[data-section]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        showSection(btn.getAttribute("data-section"));
+      });
+    });
+  }
+
+  // Provedor de IA (API key / base URL) -------------------------------
+  let providerState = { has_api_key: false };
+
+  async function loadProviderSettings() {
+    const p = await api("/admin/api/ai-provider");
+    providerState.has_api_key = !!p.has_api_key;
+    const baseEl = document.getElementById("aiProviderBaseUrl");
+    if (baseEl) baseEl.value = p.base_url || "";
+    const keyEl = document.getElementById("aiProviderApiKey");
+    if (keyEl) {
+      keyEl.value = "";
+      keyEl.placeholder = p.has_api_key
+        ? "••••" + (p.api_key_masked || "").replace(/^..../, "") + " — mantida (digite p/ trocar)"
+        : "sk-… (em branco = offline)";
+    }
+    const modelEl = document.getElementById("aiProviderModel");
+    if (modelEl) modelEl.value = p.model || "";
+    const status = document.getElementById("aiProviderStatus");
+    if (status) {
+      status.textContent = p.has_api_key ? "IA habilitada" : "IA desabilitada (offline)";
+      status.className = "badge " + (p.has_api_key ? "text-bg-success" : "text-bg-secondary");
+    }
+  }
+
+  async function saveProviderSettings() {
+    const payload = { base_url: document.getElementById("aiProviderBaseUrl").value.trim() };
+    const typed = document.getElementById("aiProviderApiKey").value.trim();
+    const model = document.getElementById("aiProviderModel").value.trim();
+    if (typed) payload.api_key = typed;
+    if (model) payload.model = model;
+    try {
+      const saved = await api("/admin/api/ai-provider", { method: "PUT", body: JSON.stringify(payload) });
+      providerState.has_api_key = !!saved.has_api_key;
+      toast(saved.has_api_key ? "Credenciais do provedor de IA salvas." : "IA desabilitada (offline).", "success");
+      loadProviderSettings();
+    } catch (e) { toast(e.message, "danger"); }
+  }
+
+  // Sistema & Banco (paths / storage) ---------------------------------
+  async function loadSystemSettings() {
+    const s = await api("/admin/api/system-settings");
+    const db = s.database || {};
+    const up = s.upload_folder || {};
+    const dbPath = document.getElementById("sysDbPath");
+    if (dbPath) dbPath.value = db.path || "";
+    const dbStatus = document.getElementById("sysDbStatus");
+    if (dbStatus) {
+      dbStatus.textContent = db.status === "ok" ? "online" : "com erro";
+      dbStatus.className = "badge " + (db.status === "ok" ? "text-bg-success" : "text-bg-danger");
+    }
+    const sysDbSize = document.getElementById("sysDbSize");
+    if (sysDbSize) sysDbSize.textContent = formatBytes(db.size_bytes);
+    const upEl = document.getElementById("sysUploadFolder");
+    if (upEl) upEl.value = up.path || "";
+    const upNote = document.getElementById("sysUploadNote");
+    if (upNote) upNote.textContent = up.exists
+      ? ("gravável: " + (up.writable ? "sim" : "não"))
+      : "pasta ainda não criada";
+    const pending = document.getElementById("sysPendingNote");
+    if (pending) {
+      pending.textContent = (db.pending_path || up.pending_path)
+        ? "Novo caminho de banco pendente — reinicie o servidor para aplicar."
+        : "";
+    }
+  }
+
+  async function saveSystemSettings() {
+    const payload = { upload_folder: document.getElementById("sysUploadFolder").value.trim() };
+    try {
+      const r = await api("/admin/api/system-settings", { method: "PUT", body: JSON.stringify(payload) });
+      const msg = (r.messages || []).join(" ");
+      toast(msg || "Configuração de sistema salva.", r.requires_restart ? "warning" : "success");
+      loadSystemSettings();
+      loadStorage();
+      loadMetrics();
+    } catch (e) { toast(e.message, "danger"); }
+  }
+
   // Init ---------------------------------------------------------------
   function wireListeners() {
     ["userSearch", "planFilter", "statusFilter"].forEach(function (id) {
@@ -662,16 +763,7 @@ const Admin = (function () {
       if (el) el.addEventListener("input", updateAIConfigPreview);
     });
 
-    // Troca de abas: carrega dados sob demanda (sem reload de página).
-    const tabs = document.getElementById("adminTabs");
-    if (tabs) {
-      tabs.addEventListener("shown.bs.tab", function (e) {
-        const id = (e.target.getAttribute("data-bs-target") || "").replace("#", "");
-        if (id === "pane-ai") { loadAIUsage().catch(function () {}); loadAIConfig().catch(function () {}); }
-        if (id === "pane-audit") { loadErrors().catch(function () {}); loadStorage().catch(function () {}); }
-        if (id === "pane-config") { loadFreemiumLimits().catch(function () {}); }
-      });
-    }
+    wireNav();
   }
 
   async function init() {
@@ -679,8 +771,10 @@ const Admin = (function () {
       await Promise.all([
         loadMetrics(), loadUsers(), loadTaxes(), loadCatalog(),
         loadErrors(), populateHistoryUsers(), loadFreemiumLimits(), loadStorage(),
+        loadAIUsage(), loadAIConfig(), loadProviderSettings(), loadSystemSettings(),
       ]);
       wireListeners();
+      showSection("overview");
     } catch (e) {
       toast(e.message, "danger");
     }
@@ -703,6 +797,10 @@ const Admin = (function () {
     loadAIConfig: loadAIConfig,
     saveAIConfig: saveAIConfig,
     updateAIConfigPreview: updateAIConfigPreview,
+    loadProviderSettings: loadProviderSettings,
+    saveProviderSettings: saveProviderSettings,
+    loadSystemSettings: loadSystemSettings,
+    saveSystemSettings: saveSystemSettings,
     loadErrors: loadErrors,
     resolveError: resolveError,
     loadStorage: loadStorage,

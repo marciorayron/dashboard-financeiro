@@ -10,6 +10,8 @@ HTTP 403. Reúne:
   * Métricas globais do sistema.
   * Edição de faixas de INSS/IRRF e do catálogo de rubricas (sem deploy).
 """
+import os
+
 from flask import Blueprint, current_app, jsonify, render_template, request, session
 
 from database.connection import get_db
@@ -26,7 +28,7 @@ from models.user import (
     to_dict as user_to_dict,
 )
 from routes.auth import admin_required
-from services import admin_service, monitoring_service, settings_service
+from services import admin_service, monitoring_service, settings_service, system_config
 from services.analytics_service import theoretical_recurrent_net_for_month
 
 admin_bp = Blueprint("admin", __name__)
@@ -322,6 +324,193 @@ def admin_put_ai_config():
     db = get_db()
     saved = settings_service.save_ai_config(db, body)
     return jsonify(saved)
+
+
+def _mask_secret(value: str) -> str:
+    """Mascara um segredo (API key) para exibição segura no painel."""
+    value = str(value or "")
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return "••••••••"
+    return f"{value[:4]}••••{value[-4:]}"
+
+
+@admin_bp.route("/admin/api/ai-provider", methods=["GET"])
+@admin_required
+def admin_get_ai_provider():
+    """
+    Retorna a configuração do provedor de IA em uso, com a chave mascarada.
+
+    A chave completa nunca sai no JSON — apenas ``has_api_key`` e um trecho
+    mascarado, para o painel indicar se a IA está habilitada.
+    """
+    db = get_db()
+    stored = system_config.read_overrides().get("ai") or {}
+    stored_key = stored.get("DEEPSEEK_API_KEY")
+    effective = current_app.config.get("DEEPSEEK_API_KEY") or ""
+    key = stored_key if stored_key is not None else effective
+    base_url = (
+        stored.get("DEEPSEEK_BASE_URL")
+        or current_app.config.get("DEEPSEEK_BASE_URL")
+        or system_config.DEFAULT_AI_BASE_URL
+    )
+    model = settings_service.get_ai_config(db).get("model")
+    return jsonify(
+        {
+            "base_url": base_url,
+            "model": model,
+            "has_api_key": bool(key),
+            "api_key_masked": _mask_secret(key),
+            "is_custom": stored_key is not None,
+        }
+    )
+
+
+@admin_bp.route("/admin/api/ai-provider", methods=["PUT"])
+@admin_required
+def admin_put_ai_provider():
+    """
+    Atualiza, de forma segura, as credenciais do provedor de IA.
+
+    Corpo JSON (todos opcionais; campos ausentes são mantidos):
+      * ``api_key``  — nova chave; string vazia desabilita a IA (offline).
+      * ``base_url`` — URL base do provedor (OpenAI-compatível); vazio = padrão.
+
+    Aplica o valor imediatamente (``current_app.config``) e o persiste para o
+    próximo boot. A chave não é retornada em claro na resposta.
+    """
+    body = request.get_json(silent=True) or {}
+    api_key = body.get("api_key")
+    base_url = body.get("base_url")
+
+    if base_url is not None:
+        base_url = str(base_url).strip()
+        if base_url and not base_url.startswith(("http://", "https://")):
+            return jsonify({"error": "base_url deve ser uma URL http(s) válida."}), 400
+
+    if api_key is not None:
+        api_key = str(api_key).strip()
+
+    # Persiste (para restaurar no boot) e aplica no processo em execução.
+    system_config.save_ai_provider(api_key=api_key, base_url=base_url)
+    if api_key is not None:
+        current_app.config["DEEPSEEK_API_KEY"] = api_key
+    if base_url is not None:
+        current_app.config["DEEPSEEK_BASE_URL"] = base_url or system_config.DEFAULT_AI_BASE_URL
+
+    # Atualiza o modelo ativo (quando informado) via ai_config persistente.
+    if body.get("model"):
+        settings_service.save_ai_config(get_db(), {"model": str(body["model"]).strip()})
+
+    return admin_get_ai_provider()
+
+
+def _dir_size_bytes(path: str) -> int:
+    """Soma os bytes dos arquivos dentro de um diretório (1 nível)."""
+    total = 0
+    try:
+        for name in os.listdir(path):
+            full = os.path.join(path, name)
+            if os.path.isfile(full):
+                total += os.path.getsize(full)
+    except OSError:
+        pass
+    return total
+
+
+def _system_settings_payload():
+    """Payload de Sistema & Banco: paths efetivos + status + pendências."""
+    cfg = current_app.config
+    db_path = str(cfg.get("DATABASE_PATH", "") or "")
+    upload_path = str(cfg.get("UPLOAD_FOLDER", "") or "")
+    db = get_db()
+
+    # Prova de leitura para saber se o banco responde.
+    db_status = "ok"
+    try:
+        db.execute("SELECT 1").fetchone()
+    except Exception:  # noqa: BLE001
+        db_status = "error"
+
+    pending = system_config.read_overrides().get("paths") or {}
+    db_exists = os.path.isfile(db_path) if db_path else False
+    up_exists = os.path.isdir(upload_path) if upload_path else False
+
+    return {
+        "database": {
+            "engine": "sqlite",
+            "path": db_path,
+            "status": db_status,
+            "exists": db_exists,
+            "size_bytes": os.path.getsize(db_path) if db_exists else 0,
+            "pending_path": pending.get("DATABASE_PATH") or None,
+        },
+        "upload_folder": {
+            "path": upload_path,
+            "exists": up_exists,
+            "writable": os.access(upload_path, os.W_OK) if up_exists else False,
+            "size_bytes": _dir_size_bytes(upload_path) if up_exists else 0,
+            "pending_path": pending.get("UPLOAD_FOLDER") or None,
+        },
+    }
+
+
+@admin_bp.route("/admin/api/system-settings", methods=["GET"])
+@admin_required
+def admin_get_system_settings():
+    """Fetch effective system paths (DATABASE_PATH / UPLOAD_FOLDER) + status."""
+    return jsonify(_system_settings_payload())
+
+
+@admin_bp.route("/admin/api/system-settings", methods=["PUT"])
+@admin_required
+def admin_put_system_settings():
+    """
+    Atualiza caminhos de sistema de forma segura.
+
+    * ``upload_folder`` é aplicado imediatamente (novos uploads) e persistido.
+    * ``database_path`` NÃO é trocado a quente — é persistido e entra em vigor
+      apenas após reinício, evitando quebrar conexões/transações em aberto.
+    """
+    body = request.get_json(silent=True) or {}
+    payload = _system_settings_payload()
+    messages = []
+    requires_restart = False
+
+    upload_folder = body.get("upload_folder")
+    if upload_folder is not None:
+        upload_folder = os.path.expanduser(str(upload_folder).strip())
+        if not upload_folder:
+            return jsonify({"error": "upload_folder não pode ser vazio."}), 400
+        try:
+            os.makedirs(upload_folder, exist_ok=True)
+            writable = os.access(upload_folder, os.W_OK)
+        except OSError as exc:
+            return jsonify({"error": f"Não foi possível acessar o diretório: {exc}"}), 400
+        if not writable:
+            return jsonify({"error": "O diretório informado não é gravável."}), 400
+        system_config.save_paths(upload_folder=upload_folder)
+        current_app.config["UPLOAD_FOLDER"] = upload_folder
+        messages.append("Pasta de uploads atualizada e aplicada em tempo real.")
+
+    database_path = body.get("database_path")
+    if database_path is not None:
+        database_path = os.path.expanduser(str(database_path).strip())
+        if not database_path:
+            return jsonify({"error": "database_path não pode ser vazio."}), 400
+        if database_path != payload["database"]["path"]:
+            system_config.save_paths(database_path=database_path)
+            requires_restart = True
+            messages.append(
+                "DATABASE_PATH atualizado — será aplicado após reiniciar o servidor "
+                "(o banco ativo não é trocado a quente)."
+            )
+
+    result = _system_settings_payload()
+    result["requires_restart"] = requires_restart
+    result["messages"] = messages
+    return jsonify(result)
 
 
 @admin_bp.route("/admin/api/storage", methods=["GET"])

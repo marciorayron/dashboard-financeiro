@@ -262,7 +262,17 @@ async function askAI(question) {
   if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Pensando...'; }
   try {
     const data = await apiPostJson("/api/analytics/ask-ai", { question: question });
-    showAIAnswer(data.answer || "");
+    // Normaliza a resposta de forma defensiva. Um HTTP 200 do ask-ai deve
+    // trazer {"answer": "<texto>"}; porém, se o corpo vier vazio/não-objeto
+    // (retorno inesperado/fallback do provedor) ou usar chave alternativa
+    // ("response"/"message"), extraímos com segurança — SEMPRE sem lançar
+    // exceção dentro deste bloco de sucesso (evita cair no toast de erro
+    // genérico apesar do backend já ter respondido 200).
+    const raw = (data && typeof data === "object")
+      ? (data.answer ?? data.response ?? data.message)
+      : "";
+    const text = (raw === undefined || raw === null) ? "" : String(raw);
+    showAIAnswer(text);
     const ansEl = document.getElementById("aiAnswer");
     if (ansEl) ansEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
   } catch (err) {
@@ -2119,6 +2129,16 @@ function initAI() {
   }
 }
 
+// Fecha o dropdown do usuário ao acionar ações que abrem modal/links (UX limpa).
+function initNavbar() {
+  document.querySelectorAll(".user-menu .dropdown-item[data-bs-toggle='modal']").forEach(function (item) {
+    item.addEventListener("click", function () {
+      const dd = item.closest(".dropdown");
+      if (dd && window.bootstrap) bootstrap.Dropdown.getOrCreateInstance(dd).hide();
+    });
+  });
+}
+
 document.addEventListener("DOMContentLoaded", function () {
   function safeInit(fn) {
     try {
@@ -2132,6 +2152,7 @@ document.addEventListener("DOMContentLoaded", function () {
   }
   // 1) Upload PRIMEIRO — nunca deve ser bloqueado por rede/gráficos.
   safeInit(initUpload);
+  safeInit(initNavbar);
   safeInit(initAdvancedFilters);
   safeInit(initProfile);
   safeInit(initOvertimeSimulator);

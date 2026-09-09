@@ -117,6 +117,12 @@ def create_app(env: str = None) -> Flask:
 
     app.json = SafeJSONProvider(app)
 
+    # 1.2) Overrides administrativos persistidos (IA provider, paths). Aplicados
+    # antes da inicialização do banco; ignorados no ambiente de teste.
+    from services.system_config import apply_to_config
+
+    apply_to_config(app, env)
+
     # 2) Configuração de logging.
     logging.basicConfig(
         level=logging.DEBUG if app.config.get("DEBUG") else logging.INFO,
