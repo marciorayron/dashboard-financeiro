@@ -151,6 +151,13 @@ def create_app(env: str = None) -> Flask:
 
         claim_holerites_for_admin(_get_db())
 
+        # 5.0.1) Modelo de IA ativo (salvo no painel admin) -> runtime config,
+        # para que o ai_service (via LiteLLM) use o modelo correto sem deploy.
+        from services.settings_service import get_ai_config as _get_ai_config
+
+        _active_model = (_get_ai_config(_get_db()) or {}).get("model") or "deepseek-chat"
+        app.config.setdefault("DEEPSEEK_MODEL", _active_model)
+
         # 5.1) Catálogo oficial de rubricas + migrações de classificação.
         from database.connection import get_db
         from services.db_service import (

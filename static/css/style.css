@@ -440,6 +440,109 @@ body.privacy-mode canvas.chart-fill {
   line-height: 1.5;
 }
 
+/* =====================================================================
+   Conteúdo Markdown renderizado (ask-ai, explain-card, explain-anomaly)
+   Compartilhado via `.md-content`: tipografia, listas, código e tabelas GFM.
+   ===================================================================== */
+.md-content {
+  /* Preserva quebras de linha do Markdown bruto e evita overflow horizontal. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* Elementos de bloco controlam o próprio espaçamento; resetamos o `pre-wrap`
+   para não gerar linhas extras entre <p>, <li>, <h2>, <table> etc. */
+.md-content p,
+.md-content ul,
+.md-content ol,
+.md-content li,
+.md-content h1,
+.md-content h2,
+.md-content h3,
+.md-content h4,
+.md-content h5,
+.md-content h6,
+.md-content table,
+.md-content thead,
+.md-content tbody,
+.md-content tr,
+.md-content th,
+.md-content td,
+.md-content blockquote,
+.md-content pre,
+.md-content code {
+  white-space: normal;
+}
+
+/* Tipografia do Markdown renderizado. */
+.md-content > :first-child { margin-top: 0; }
+.md-content > :last-child { margin-bottom: 0; }
+.md-content p { margin-bottom: 0.6rem; }
+.md-content h1,
+.md-content h2,
+.md-content h3,
+.md-content h4,
+.md-content h5,
+.md-content h6 {
+  margin: 0.75rem 0 0.4rem;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.md-content h1 { font-size: 1.15rem; }
+.md-content h2 { font-size: 1.05rem; }
+.md-content h3 { font-size: 0.98rem; }
+.md-content strong { font-weight: 600; color: #fff; }
+.md-content ul,
+.md-content ol { margin: 0 0 0.6rem 1.15rem; padding: 0; }
+.md-content li { margin-bottom: 0.2rem; }
+.md-content code {
+  background: rgba(148, 163, 184, 0.16);
+  border-radius: 4px;
+  padding: 0.05rem 0.35rem;
+  font-size: 0.85em;
+  color: #cbd5e1;
+}
+.md-content pre {
+  background: rgba(15, 23, 42, 0.7);
+  border: 1px solid var(--df-border);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+  overflow-x: auto;
+}
+.md-content pre code { background: transparent; padding: 0; }
+.md-content blockquote {
+  border-left: 3px solid var(--df-border);
+  margin: 0 0 0.6rem;
+  padding-left: 0.75rem;
+  color: var(--df-muted);
+}
+
+/* Tabelas GFM: rolam horizontalmente dentro do card sem estourar o layout. */
+.md-content table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  margin: 0.25rem 0 0.75rem;
+  font-size: 0.9rem;
+}
+.md-content th,
+.md-content td {
+  border: 1px solid var(--df-border);
+  padding: 0.35rem 0.6rem;
+  text-align: left;
+  vertical-align: top;
+}
+.md-content th {
+  background: rgba(59, 130, 246, 0.16);
+  font-weight: 600;
+  color: #fff;
+}
+.md-content tr:nth-child(even) td { background: rgba(148, 163, 184, 0.06); }
+
 .upgrade-benefits li {
   padding: 0.25rem 0;
 }

@@ -674,21 +674,128 @@ const Admin = (function () {
 
   // Provedor de IA (API key / base URL) -------------------------------
   let providerState = { has_api_key: false };
+  const PROVIDER_DEFAULTS = {
+    deepseek: { base: "https://api.deepseek.com", needKey: true, model: "deepseek-chat" },
+    openai: { base: "https://api.openai.com/v1", needKey: true, model: "gpt-4o-mini" },
+    gemini: { base: "https://generativelanguage.googleapis.com/v1beta", needKey: true, model: "gemini-1.5-flash" },
+    ollama: { base: "http://localhost:11434", needKey: false, model: "llama3.1" },
+    custom: { base: "", needKey: true, model: "" },
+  };
+
+  function setModelSelectValue(model) {
+    const sel = document.getElementById("aiProviderModel");
+    if (!sel) return;
+    if (model) {
+      if (!Array.from(sel.options).some(function (o) { return o.value === model; })) {
+        const opt = document.createElement("option");
+        opt.value = model;
+        opt.textContent = model;
+        sel.appendChild(opt);
+      }
+      sel.value = model;
+    }
+  }
+
+  function onProviderChange() {
+    const p = document.getElementById("aiProvider") ? document.getElementById("aiProvider").value : "deepseek";
+    const def = PROVIDER_DEFAULTS[p] || PROVIDER_DEFAULTS.deepseek;
+    const baseEl = document.getElementById("aiProviderBaseUrl");
+    if (baseEl) baseEl.value = def.base;
+    const keyEl = document.getElementById("aiProviderApiKey");
+    if (keyEl) {
+      keyEl.disabled = !def.needKey;
+      if (!def.needKey) { keyEl.value = ""; keyEl.placeholder = "Sem chave (local)"; }
+      else { keyEl.placeholder = "sk-…"; }
+    }
+    const modelSel = document.getElementById("aiProviderModel");
+    if (modelSel) {
+      modelSel.innerHTML = "";
+      if (def.model) {
+        const o = document.createElement("option");
+        o.value = def.model;
+        o.textContent = def.model;
+        modelSel.appendChild(o);
+      }
+    }
+    const st = document.getElementById("aiInspectStatus");
+    if (st) st.textContent = "";
+  }
+
+  function _applyCostsToFinOps(costs) {
+    if (!costs) return;
+    if (typeof costs.input_cost_per_token === "number") {
+      const el = document.getElementById("aiInputRate");
+      if (el) el.value = (costs.input_cost_per_token * 1e6).toFixed(8);
+    }
+    if (typeof costs.output_cost_per_token === "number") {
+      const el = document.getElementById("aiOutputRate");
+      if (el) el.value = (costs.output_cost_per_token * 1e6).toFixed(8);
+    }
+    updateAIConfigPreview();
+  }
+
+  async function testProvider() {
+    const provider = (document.getElementById("aiProvider") || {}).value || "deepseek";
+    const api_key = (document.getElementById("aiProviderApiKey") || {}).value || "";
+    const base_url = (document.getElementById("aiProviderBaseUrl") || {}).value || "";
+    const st = document.getElementById("aiInspectStatus");
+    const btn = document.getElementById("aiTestButton");
+    if (st) { st.textContent = "Inspecionando…"; st.className = "text-secondary small"; }
+    if (btn) btn.disabled = true;
+    try {
+      const r = await api("/admin/api/ai-provider/inspect", {
+        method: "POST",
+        body: JSON.stringify({ provider: provider, api_key: api_key, base_url: base_url }),
+      });
+      const sel = document.getElementById("aiProviderModel");
+      const prev = sel ? sel.value : "";
+      if (sel && Array.isArray(r.models)) {
+        sel.innerHTML = "";
+        const fallback = (PROVIDER_DEFAULTS[provider] || {}).model;
+        const list = (r.models.length ? r.models : [fallback]).filter(Boolean);
+        list.forEach(function (m) {
+          const o = document.createElement("option");
+          o.value = m;
+          o.textContent = m;
+          sel.appendChild(o);
+        });
+        if (prev && list.indexOf(prev) >= 0) sel.value = prev;
+        else if (sel.options.length) sel.selectedIndex = 0;
+      }
+      _applyCostsToFinOps(r.costs);
+      if (st) {
+        if (r.status === "online") {
+          st.textContent = "✓ Online — " + (r.message || "conectado");
+          st.className = "text-success small";
+        } else {
+          st.textContent = "✗ " + (r.message || "offline");
+          st.className = "text-danger small";
+        }
+      }
+    } catch (e) {
+      if (st) { st.textContent = "✗ " + e.message; st.className = "text-danger small"; }
+      toast(e.message, "danger");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
 
   async function loadProviderSettings() {
     const p = await api("/admin/api/ai-provider");
     providerState.has_api_key = !!p.has_api_key;
+    const provSel = document.getElementById("aiProvider");
+    if (provSel) provSel.value = PROVIDER_DEFAULTS[p.provider] ? p.provider : "deepseek";
     const baseEl = document.getElementById("aiProviderBaseUrl");
     if (baseEl) baseEl.value = p.base_url || "";
     const keyEl = document.getElementById("aiProviderApiKey");
     if (keyEl) {
+      keyEl.disabled = p.provider === "ollama";
       keyEl.value = "";
       keyEl.placeholder = p.has_api_key
         ? "••••" + (p.api_key_masked || "").replace(/^..../, "") + " — mantida (digite p/ trocar)"
-        : "sk-… (em branco = offline)";
+        : (p.provider === "ollama" ? "Sem chave (local)" : "sk-… (em branco = offline)");
     }
-    const modelEl = document.getElementById("aiProviderModel");
-    if (modelEl) modelEl.value = p.model || "";
+    setModelSelectValue(p.model || "");
     const status = document.getElementById("aiProviderStatus");
     if (status) {
       status.textContent = p.has_api_key ? "IA habilitada" : "IA desabilitada (offline)";
@@ -697,9 +804,13 @@ const Admin = (function () {
   }
 
   async function saveProviderSettings() {
-    const payload = { base_url: document.getElementById("aiProviderBaseUrl").value.trim() };
-    const typed = document.getElementById("aiProviderApiKey").value.trim();
-    const model = document.getElementById("aiProviderModel").value.trim();
+    const provider = (document.getElementById("aiProvider") || {}).value || "deepseek";
+    const payload = {
+      provider: provider,
+      base_url: (document.getElementById("aiProviderBaseUrl") || {}).value.trim(),
+    };
+    const typed = (document.getElementById("aiProviderApiKey") || {}).value.trim();
+    const model = (document.getElementById("aiProviderModel") || {}).value.trim();
     if (typed) payload.api_key = typed;
     if (model) payload.model = model;
     try {
@@ -763,6 +874,10 @@ const Admin = (function () {
       if (el) el.addEventListener("input", updateAIConfigPreview);
     });
 
+    // Trocar provedor pré-preenche base_url/modelo padrão.
+    const provSel = document.getElementById("aiProvider");
+    if (provSel) provSel.addEventListener("change", onProviderChange);
+
     wireNav();
   }
 
@@ -799,6 +914,8 @@ const Admin = (function () {
     updateAIConfigPreview: updateAIConfigPreview,
     loadProviderSettings: loadProviderSettings,
     saveProviderSettings: saveProviderSettings,
+    testProvider: testProvider,
+    onProviderChange: onProviderChange,
     loadSystemSettings: loadSystemSettings,
     saveSystemSettings: saveSystemSettings,
     loadErrors: loadErrors,

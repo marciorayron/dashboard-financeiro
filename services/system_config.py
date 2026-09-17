@@ -79,13 +79,16 @@ def save_paths(
 
 
 def save_ai_provider(
-    api_key: Optional[str] = None, base_url: Optional[str] = None
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+    provider: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Persiste credenciais do provedor de IA.
 
     ``api_key=None`` mantém o valor atual. ``api_key=""`` desabilita a IA.
     ``base_url=""``/``None`` restaura a URL padrão do provedor.
+    ``provider=None`` mantém o valor atual; ``provider=""`` remove o seletor.
     """
     overrides = _read()
     ai = overrides.setdefault("ai", {})
@@ -93,6 +96,12 @@ def save_ai_provider(
         ai["DEEPSEEK_API_KEY"] = api_key
     if base_url is not None:
         ai["DEEPSEEK_BASE_URL"] = base_url or DEFAULT_AI_BASE_URL
+    if provider is not None:
+        provider = str(provider).strip()
+        if provider:
+            ai["PROVIDER"] = provider
+        else:
+            ai.pop("PROVIDER", None)
     _write(overrides)
     return ai
 

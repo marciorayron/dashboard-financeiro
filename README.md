@@ -230,7 +230,10 @@ usam **um único prompt de sistema** em `services/ai_service.py`
 - **Metodologia de projeção** — passos transparentes para projetar o resto
   do ano (acumulado real + média × meses restantes + 13º);
 - **Qualidade da resposta** — proibição de alegar "sem dados" quando há
-  números reais no contexto fornecido.
+  números reais no contexto fornecido;
+- **Estilo e formato** — raciocínio interno direto e conciso (sem gastar
+  tokens com processo de pensamento), respondendo estritamente no formato
+  solicitado.
 
 O `role: system` nunca é alterado e a pergunta do usuário passa por
 `sanitize_query` (teto de **200 caracteres**, rejeição de padrões de

@@ -201,25 +201,41 @@
               <span class="badge text-bg-secondary" id="aiProviderStatus">—</span>
             </div>
             <div class="row g-3 align-items-end">
-              <div class="col-12 col-md-5">
+              <div class="col-12 col-md-3">
+                <label class="form-label small" for="aiProvider">Provedor</label>
+                <select class="form-select form-select-sm" id="aiProvider">
+                  <option value="deepseek">DeepSeek</option>
+                  <option value="openai">OpenAI</option>
+                  <option value="gemini">Google Gemini</option>
+                  <option value="ollama">Ollama (local)</option>
+                  <option value="custom">Custom (OpenAI-compatível)</option>
+                </select>
+              </div>
+              <div class="col-12 col-md-3">
                 <label class="form-label small" for="aiProviderApiKey">API Key</label>
                 <input type="password" class="form-control form-control-sm" id="aiProviderApiKey"
                        autocomplete="off" spellcheck="false" placeholder="sk-…" />
-                <div class="form-text small">A chave é mascarada. Deixe em branco para manter a atual.</div>
+                <div class="form-text small">Mascarada. Deixe em branco para manter.</div>
               </div>
-              <div class="col-12 col-md-4">
+              <div class="col-12 col-md-3">
                 <label class="form-label small" for="aiProviderBaseUrl">Provider Base URL</label>
                 <input type="url" class="form-control form-control-sm" id="aiProviderBaseUrl"
                        placeholder="https://api.deepseek.com" spellcheck="false" />
               </div>
               <div class="col-12 col-md-3">
                 <label class="form-label small" for="aiProviderModel">Modelo Ativo</label>
-                <input type="text" class="form-control form-control-sm" id="aiProviderModel" spellcheck="false" />
+                <select class="form-select form-select-sm" id="aiProviderModel" aria-label="Modelo ativo do provedor"></select>
               </div>
-              <div class="col-12 d-flex justify-content-end">
-                <button type="button" class="btn btn-sm btn-primary" onclick="Admin.saveProviderSettings()">
-                  <i class="bi bi-check-lg me-1"></i>Salvar Provedor
-                </button>
+              <div class="col-12">
+                <div class="d-flex flex-wrap align-items-center gap-2">
+                  <button type="button" class="btn btn-sm btn-outline-info" id="aiTestButton" onclick="Admin.testProvider()">
+                    <i class="bi bi-arrow-repeat me-1"></i>Testar &amp; Sincronizar Chave
+                  </button>
+                  <button type="button" class="btn btn-sm btn-primary" onclick="Admin.saveProviderSettings()">
+                    <i class="bi bi-check-lg me-1"></i>Salvar Provedor
+                  </button>
+                  <span class="text-secondary small" id="aiInspectStatus"></span>
+                </div>
               </div>
             </div>
           </div>

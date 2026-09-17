@@ -102,17 +102,10 @@ function explainCooldownText(seconds) {
   return parts.join(" ");
 }
 
+// Renderiza o Markdown do explain-card (bullets, negrito, tabelas GFM, etc.)
+// reutilizando o MESMO pipeline seguro (marked + DOMPurify) do ask-ai.
 function explainMarkdownHtml(md) {
-  if (!md) return "";
-  const lines = String(md).split(/\r?\n/).map(function (l) { return l.trim(); }).filter(Boolean);
-  const items = [];
-  lines.forEach(function (line) {
-    let text = line;
-    if (text.indexOf("- ") === 0) text = text.slice(2);
-    text = escapeHtml(text).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-    items.push("<li>" + text + "</li>");
-  });
-  return '<ul class="mb-0">' + items.join("") + "</ul>";
+  return renderMarkdown(md);
 }
 
 function setExplainCardLoading(loading) {
@@ -215,18 +208,49 @@ function setExplainCardTitle(cardId) {
     escapeHtml(label) + ' <span class="text-secondary fw-normal">· Explicação da IA</span>';
 }
 
+// Converte Markdown (tabelas GFM, títulos, negrito, listas, quebras) em HTML
+// seguro para injeção via innerHTML. Usa `marked` + `DOMPurify` (carregados por
+// CDN no index.html). Se algum dos dois não estiver disponível, degrada para
+// texto escapado preservando as quebras de linha — nunca injeta HTML cru.
+function renderMarkdown(md) {
+  const src = (md === null || md === undefined) ? "" : String(md);
+  if (!src.trim()) return "";
+  const marked = window.marked;
+  const purify = window.DOMPurify;
+  const hasMarked = marked && typeof marked.parse === "function";
+  const hasPurify = purify && typeof purify.sanitize === "function";
+  if (hasMarked && hasPurify) {
+    try {
+      // `breaks`: 1 quebra vira <br>; `gfm`: habilita tabelas/strikethrough.
+      marked.setOptions({ gfm: true, breaks: true });
+      return purify.sanitize(marked.parse(src), { USE_PROFILES: { html: true } });
+    } catch (err) {
+      console.warn("[renderMarkdown] Falha ao interpretar Markdown; usando texto simples.", err);
+    }
+  }
+  return escapeHtml(src).replace(/\r?\n/g, "<br>");
+}
+
 function showAIAnswer(text) {
   const el = document.getElementById("aiAnswer");
   if (!el) return;
   el.classList.remove("d-none");
-  el.innerHTML = '<i class="bi bi-stars me-1 text-primary"></i>' + escapeHtml(text);
+  el.innerHTML = '<i class="bi bi-stars me-1 text-primary"></i>' + renderMarkdown(text);
+}
+
+function showAIError(message) {
+  const el = document.getElementById("aiAnswer");
+  if (!el) return;
+  el.classList.remove("d-none");
+  el.innerHTML = '<i class="bi bi-exclamation-triangle me-1 text-danger"></i>' + escapeHtml(message);
 }
 
 function showAIDrawer(text) {
   const drawer = document.getElementById("aiDrawer");
   const body = document.getElementById("aiDrawerBody");
   if (!drawer || !body) return;
-  body.innerHTML = escapeHtml(text);
+  // Markdown → HTML seguro (marked + DOMPurify), mesmo pipeline do ask-ai.
+  body.innerHTML = renderMarkdown(text);
   drawer.classList.remove("d-none");
 }
 
@@ -261,26 +285,29 @@ async function askAI(question) {
   const original = btn ? btn.innerHTML : "";
   if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Pensando...'; }
   try {
+    // fetch p/ a API; apiPostJson lança exceção (com .status/.data) em erro HTTP.
     const data = await apiPostJson("/api/analytics/ask-ai", { question: question });
-    // Normaliza a resposta de forma defensiva. Um HTTP 200 do ask-ai deve
-    // trazer {"answer": "<texto>"}; porém, se o corpo vier vazio/não-objeto
-    // (retorno inesperado/fallback do provedor) ou usar chave alternativa
-    // ("response"/"message"), extraímos com segurança — SEMPRE sem lançar
-    // exceção dentro deste bloco de sucesso (evita cair no toast de erro
-    // genérico apesar do backend já ter respondido 200).
+    // HTTP 200 do ask-ai retorna {"answer": "<texto>"}; aceitamos "response"/"message".
     const raw = (data && typeof data === "object")
       ? (data.answer ?? data.response ?? data.message)
       : "";
-    const text = (raw === undefined || raw === null) ? "" : String(raw);
-    showAIAnswer(text);
+    const text = (raw === undefined || raw === null) ? "" : String(raw).trim();
+    if (!text) {
+      showAIError("A IA não retornou uma resposta. Tente reformular a pergunta ou repita em instantes.");
+    } else {
+      // Insere a resposta dentro do container de resposta (✨).
+      showAIAnswer(text);
+    }
     const ansEl = document.getElementById("aiAnswer");
     if (ansEl) ansEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
   } catch (err) {
+    let message = err.message || "Falha ao consultar a IA.";
     if (err.status === 402 || err.status === 429) {
-      openUpgradeModal(err.data && err.data.message);
-    } else {
-      showToast(err.message || "Falha ao consultar a IA.", "danger");
+      message = (err.data && err.data.message) || "Você atingiu o limite de consultas de IA do seu plano.";
+      openUpgradeModal(message);
     }
+    showAIError(message);                       // feedback amigável no container
+    showToast(message, (err.status === 402 || err.status === 429) ? "warning" : "danger");
   } finally {
     if (btn) { btn.disabled = false; btn.innerHTML = original; }
   }

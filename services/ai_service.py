@@ -4,7 +4,7 @@ services/ai_service.py
 Serviço de IA (DeepSeek) para o dashboard financeiro, com foco em segurança:
 
   * Integração com a API da DeepSeek (``deepseek-chat``) com parâmetros
-    rígidos: ``max_tokens=250`` e ``temperature=0.3``.
+    rígidos: ``max_tokens=2048`` e ``temperature=0.3``.
   * Chave carregada estritamente via ``os.getenv("DEEPSEEK_API_KEY")``.
   * Proteção contra Prompt Injection e validação de entrada:
       - Tamanho máximo de 200 caracteres por consulta (HTTP 400 se exceder).
@@ -33,8 +33,13 @@ logger = logging.getLogger(__name__)
 # Constantes de segurança / governança de tokens
 # ---------------------------------------------------------------------
 MAX_QUERY_LENGTH = 200          # limite de caracteres por consulta
-AI_MAX_TOKENS = 250             # teto rígido de geração (tokens)
+AI_MAX_TOKENS = 2048            # teto de geração (tokens) — evita resposta cortada
+                                # (o raciocínio interno do modelo também consome tokens)
 AI_TEMPERATURE = 0.3            # geração determinística/segura
+AI_REQUEST_TIMEOUT = 30         # timeout (s) da chamada síncrona ao provedor
+# Chave simbólica usada apenas para provedores LOCAIS (Ollama), que não exigem
+# segredo. Nunca enviada a provedores cloud externos.
+_LOCAL_OLLAMA_KEY = "ollama"
 
 # Limites do modelo Freemium: {plano: (max_consultas, janela_segundos)}.
 AI_PLAN_LIMITS: Dict[str, tuple] = {
@@ -123,6 +128,58 @@ class RateLimitError(AIValidationError):
         )
 
 
+class AIUpstreamError(Exception):
+    """
+    Erro de comunicação/processamento com o provedor de IA.
+
+    Diferente de `AIValidationError` (entrada/limite do usuário), indica uma
+    falha real do provider: indisponibilidade, erro de API ou resposta vazia.
+    A rota Flask traduz para HTTP 500 (ou o `status_code` informado).
+    """
+
+    status_code = 500
+
+    def __init__(
+        self,
+        error: str = "AI_ERROR",
+        message: str = "Falha ao consultar o provedor de IA.",
+        status_code: int = 500,
+    ):
+        super().__init__(message)
+        self.error = error
+        self.message = message
+        self.status_code = status_code
+
+    def payload(self) -> dict:
+        return {"error": self.error, "message": self.message}
+
+
+class AIUpstreamTimeoutError(AIUpstreamError):
+    """O provedor de IA estourou o timeout da chamada (HTTP 504)."""
+
+    def __init__(
+        self,
+        message: str = (
+            "O provedor de IA demorou para responder. Tente novamente em instantes."
+        ),
+    ):
+        super().__init__("AI_TIMEOUT", message, 504)
+
+
+def _log_upstream_error(model: str, exc: Exception) -> None:
+    """Registra o erro do provedor via `current_app.logger.error` (fallback p/ logger)."""
+    try:
+        from flask import current_app
+
+        current_app.logger.error(
+            "Erro na chamada de IA ao modelo %s: %s", model, exc, exc_info=True
+        )
+    except Exception:  # noqa: BLE001 - fora de app context
+        logger.error(
+            "Erro na chamada de IA ao modelo %s: %s", model, exc, exc_info=True
+        )
+
+
 def _resolve_api_key(api_key: Optional[str]) -> str:
     """
     Resolve a chave da API.
@@ -135,6 +192,32 @@ def _resolve_api_key(api_key: Optional[str]) -> str:
     if api_key is not None:
         return api_key
     return os.getenv("DEEPSEEK_API_KEY", "")
+
+
+def _resolve_model(model: Optional[str]) -> str:
+    """
+    Resolve o identificador do modelo de IA.
+
+    Prioridade: parâmetro explícito -> modelo configurado em runtime (lido de
+    ``current_app.config["DEEPSEEK_MODEL"]``, sincronizado pelo painel admin)
+    -> env ``DEEPSEEK_MODEL``/``AI_MODEL`` -> fallback ``deepseek-chat``.
+    """
+    if model and str(model).strip():
+        return str(model).strip()
+    # Lê o modelo ativo configurado no painel admin (sem importar Flask no topo).
+    try:
+        from flask import current_app
+
+        configured = current_app.config.get("DEEPSEEK_MODEL")
+        if configured and str(configured).strip():
+            return str(configured).strip()
+    except Exception:  # noqa: BLE001 - fora de app context
+        pass
+    return (
+        os.getenv("DEEPSEEK_MODEL")
+        or os.getenv("AI_MODEL")
+        or "deepseek-chat"
+    )
 
 
 def sanitize_query(query: str) -> str:
@@ -163,39 +246,160 @@ def sanitize_query(query: str) -> str:
     return re.sub(r"\s*\n\s*", " ", text).strip()
 
 
-def _chat(messages: List[dict], api_key: str, base_url: str) -> Optional[str]:
+def _is_local_ollama(base_url: str, model: Optional[str] = None) -> bool:
+    """Detecta provedor Ollama local (porta 11434 / URL ou modelo 'ollama')."""
+    base = str(base_url or "").lower()
+    m = str(model or "").lower()
+    return "11434" in base or "ollama" in base or "ollama" in m
+
+
+# Mapeia o provider para o prefixo esperado pelo LiteLLM no parâmetro `model`.
+_PROVIDER_PREFIX = {
+    "deepseek": "deepseek",
+    "openai": "openai",
+    "gemini": "gemini",
+    "ollama": "ollama",
+    "custom": "openai",  # endpoints OpenAI-compatíveis usam o provider 'openai'
+}
+
+
+def _infer_provider(base_url: str, model: Optional[str] = None) -> Optional[str]:
     """
-    Chama o endpoint de chat da DeepSeek e retorna o texto da resposta.
+    Infere o provider a partir da base_url/modelo quando não informado.
+
+    Apenas orienta o prefixo do LiteLLM (rota de rede e chave vêm de
+    ``api_base``/``api_key``), garantindo que modelos não padronizados
+    (ex.: ``deepseek-v4-flash``) recebam o prefixo ``deepseek/...``.
+    """
+    blob = f"{str(base_url or '')} {str(model or '')}".lower()
+    if "11434" in blob or "ollama" in blob:
+        return "ollama"
+    if "generativelanguage.googleapis.com" in blob or "gemini" in blob:
+        return "gemini"
+    if "api.openai.com" in blob or "openai/" in blob:
+        return "openai"
+    if "api.deepseek.com" in blob or "deepseek" in blob:
+        return "deepseek"
+    return None
+
+
+def _ensure_provider_prefix(model: str, provider: Optional[str]) -> str:
+    """
+    Garante o prefixo de provedor exigido pelo LiteLLM (ex.: ``deepseek/<model>``).
+
+    * Modelos que já trazem o prefixo (``provider/modelo``) ou uma barra são mantidos.
+    * Caso contrário, prefixa com o provider inferido/configurado. Sem provider
+      inferido e sem ``api_base``, o modelo fica intacto (modelos conhecidos do
+      LiteLLM roteiam automaticamente pelo nome).
+    """
+    model = str(model or "").strip()
+    if not model or "/" in model:
+        return model
+    prefix = _PROVIDER_PREFIX.get(str(provider or "").strip().lower())
+    return f"{prefix}/{model}" if prefix else model
+
+
+def _chat(
+    messages: List[dict],
+    api_key: str,
+    base_url: str,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Chama o LLM via ``litellm.completion`` e retorna o texto da resposta.
+
+    Parâmetros configuráveis em runtime (`model`, `api_key`, `api_base`) são
+    repassados ao LiteLLM, que roteia o provider correto. O modelo recebe o
+    prefixo adequado (ex.: ``deepseek/deepseek-v4-flash``) quando o provider é
+    conhecido, evitando o erro ``LLM Provider NOT provided``.
+
+    * Provedores cloud externos exigem API key — sem chave retorna ``None``
+      (aplicação segue em modo offline/best-effort, mantendo testes off-line).
+    * Ollama local NÃO exige chave: usa uma chave simbólica de placeholder.
 
     Returns:
-        str: conteúdo da resposta, ou None em caso de falha.
+        str: conteúdo da resposta.
+
+    Raises:
+        AIUpstreamTimeoutError: quando o provedor excede o timeout.
+        AIUpstreamError: em erro de API/indisponibilidade do provedor.
+        Retorna ``None`` apenas sem chave (provedor externo offline -> os
+        chamadores aplicam o fallback best-effort).
     """
-    if not api_key:
+    provider = (str(provider or "").strip().lower()
+                or _infer_provider(base_url, model)
+                or ("custom" if base_url else None))
+    local_llm = provider == "ollama" or _is_local_ollama(base_url, model)
+    if not api_key and not local_llm:
+        # Cloud provider sem chave => validação rígida mantida (offline).
         return None
-    url = f"{base_url.rstrip('/')}/chat/completions"
-    payload = {
-        "model": "deepseek-chat",
-        "messages": messages,
-        "max_tokens": AI_MAX_TOKENS,     # teto rígido
-        "temperature": AI_TEMPERATURE,   # determinístico/seguro
-    }
+
+    model = _resolve_model(model)
+    if local_llm and not api_key:
+        # Local não precisa de segredo; LiteLLM aceita chave simbólica.
+        api_key = _LOCAL_OLLAMA_KEY
+
+    # Prefixo do provedor p/ o LiteLLM (deepseek/..., gemini/..., ollama/...).
+    model = _ensure_provider_prefix(model, provider)
+
+    # Import local do LiteLLM: só ocorre em chamadas reais (testes offline e o
+    # fluxo "sem chave" permanecem determinísticos, sem pagar o import pesado).
     try:
-        resp = requests.post(
-            url,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=60,
+        import litellm
+    except Exception as exc:  # noqa: BLE001
+        _log_upstream_error(model, exc)
+        raise AIUpstreamError(
+            "AI_UNAVAILABLE",
+            "O serviço de IA não está disponível no momento.",
+        ) from exc
+
+    # Captura tipos específicos de exceção do LiteLLM (compatível com versões
+    # em que `exceptions.Timeout`/`APIError` ainda não existem).
+    _TimeoutError = getattr(getattr(litellm, "exceptions", None), "Timeout", None)
+    _APIError = getattr(getattr(litellm, "exceptions", None), "APIError", None)
+
+    # Execução 100% síncrona e thread-safe: `litellm.completion` bloqueia o
+    # thread atual via cliente HTTP síncrono e NÃO dispara um event-loop
+    # assíncrono (streaming desligado). Flags evitam ruído/log de debug.
+    litellm.suppress_debug_info = True
+    litellm.drop_params = True
+    try:
+        response = litellm.completion(
+            model=model,
+            messages=messages,
+            api_key=api_key,
+            api_base=(base_url or None),
+            max_tokens=AI_MAX_TOKENS,     # teto de geração (evita cortes)
+            temperature=AI_TEMPERATURE,   # determinístico/seguro
+            timeout=AI_REQUEST_TIMEOUT,   # evita travar o worker do Flask
         )
-        resp.raise_for_status()
-        body = resp.json()
-        content = body["choices"][0]["message"]["content"]
-        return str(content).strip()
-    except Exception as exc:  # noqa: BLE001 - best-effort
-        logger.warning("Falha ao consultar DeepSeek: %s", exc)
-        return None
+        choice = response.choices[0]
+        content = getattr(choice.message, "content", None)
+        if content is None and hasattr(choice.message, "get"):
+            content = choice.message.get("content")
+        content = str(content or "").strip()
+        if not content:
+            raise AIUpstreamError(
+                "AI_EMPTY_RESPONSE",
+                f"O provedor de IA retornou resposta vazia para '{model}'.",
+            )
+        return content
+    except AIUpstreamError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - mapeia para erro HTTP adequado
+        _log_upstream_error(model, exc)
+        if _TimeoutError is not None and isinstance(exc, _TimeoutError):
+            raise AIUpstreamTimeoutError() from exc
+        if _APIError is not None and isinstance(exc, _APIError):
+            raise AIUpstreamError(
+                "AI_API_ERROR",
+                "Erro da API do provedor de IA ao gerar a resposta.",
+            ) from exc
+        raise AIUpstreamError(
+            "AI_API_ERROR",
+            f"Falha ao consultar o provedor de IA (erro: {type(exc).__name__}).",
+        ) from exc
 
 
 # ---------------------------------------------------------------------
@@ -239,7 +443,13 @@ _MASTER_SYSTEM_PROMPT = (
     "dados suficientes'. Utilize os números disponíveis no JSON para realizar os "
     "cálculos e forneça respostas diretas e fundamentadas. "
     "Use a tabela mês a mês para apontar o valor mínimo/máximo e eventuais "
-    "tendências entre competências."
+    "tendências entre competências. "
+    "Estilo e formato: "
+    "Seja direto e conciso no seu raciocínio interno; não gaste tokens "
+    "explicando o processo de pensamento, repetindo o enunciado ou listando "
+    "alternativas descartadas. Vá direto ao resultado. Responda estritamente "
+    "no formato solicitado (número de frases/bullets/estrutura pedidos), "
+    "priorizando sempre a resposta final."
 )
 
 
@@ -744,3 +954,191 @@ def get_ai_usage_summary(db, user_id: int) -> dict:
         "used": used,
         "remaining": max(limit - used, 0),
     }
+
+
+# ---------------------------------------------------------------------
+# Inspeção de provedores de IA (LiteLLM / FinOps) — usado pelo painel admin
+# ---------------------------------------------------------------------
+# Metadados por provedor para montar a chamada de listagem de modelos e
+# preencher o dropdown dinâmico + custos padrão de tokens no UI.
+PROVIDER_META: Dict[str, dict] = {
+    "deepseek": {
+        "label": "DeepSeek",
+        "base_url": "https://api.deepseek.com",
+        "default_model": "deepseek-chat",
+        "auth": "bearer",
+    },
+    "openai": {
+        "label": "OpenAI",
+        "base_url": "https://api.openai.com/v1",
+        "default_model": "gpt-4o-mini",
+        "auth": "bearer",
+    },
+    "gemini": {
+        "label": "Google Gemini",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta",
+        "default_model": "gemini-1.5-flash",
+        "auth": "query",
+        "key_param": "key",
+    },
+    "ollama": {
+        "label": "Ollama (local)",
+        "base_url": "http://localhost:11434",
+        "default_model": "llama3.1",
+        "auth": "none",
+    },
+    "custom": {
+        "label": "Custom (OpenAI-compatível)",
+        "base_url": "",
+        "default_model": "",
+        "auth": "bearer",
+    },
+}
+
+# Custos padrão (US$ por token) usados como fallback quando o modelo não está
+# na tabela `litellm.model_cost`. Ollama é local => custo zero.
+PROVIDER_FALLBACK_COSTS: Dict[str, dict] = {
+    "deepseek": {"input_cost_per_token": 0.00000027, "output_cost_per_token": 0.00000110},
+    "gemini": {"input_cost_per_token": None, "output_cost_per_token": None},
+    "openai": {"input_cost_per_token": None, "output_cost_per_token": None},
+    "ollama": {"input_cost_per_token": 0.0, "output_cost_per_token": 0.0},
+    "custom": {"input_cost_per_token": None, "output_cost_per_token": None},
+}
+
+
+def list_available_providers() -> list:
+    """Lista os provedores suportados pelo seletor do painel admin."""
+    return [
+        {"id": pid, "label": meta["label"], "base_url": meta["base_url"]}
+        for pid, meta in PROVIDER_META.items()
+    ]
+
+
+def _normalize_model_id(provider: str, model_id: str) -> str:
+    """Limpa o id devolvido pela API do provedor (ex.: 'models/gemini-x' -> id)."""
+    model_id = str(model_id or "").strip()
+    if provider == "gemini" and model_id.startswith("models/"):
+        return model_id[len("models/"):]
+    return model_id
+
+
+
+def inspect_provider(
+    provider: str = "deepseek",
+    api_key: str = "",
+    base_url: str = "",
+) -> dict:
+    """
+    Valida credenciais e recupera a lista dinâmica de modelos do provedor.
+
+    Returns:
+        dict: {"status": "online"|"offline", "message", "models": [...],
+               "costs": {"input_cost_per_token", "output_cost_per_token"}}
+    """
+    provider = str(provider or "deepseek").strip().lower()
+    meta = PROVIDER_META.get(provider)
+    if not meta:
+        raise ValueError(
+            f"Provedor inválido '{provider}'. Use: {', '.join(PROVIDER_META)}."
+        )
+
+    base = str(base_url or meta.get("base_url") or "").rstrip("/")
+    if not base:
+        return {
+            "status": "offline",
+            "message": "Informe uma base_url válida para este provedor.",
+            "models": [],
+            "costs": {},
+        }
+
+    # Validação rígida para provedores cloud externos: exigem chave. Ollama
+    # local (e endpoints OpenAI-compatíveis 'custom') podem operar sem chave.
+    if provider in ("deepseek", "openai", "gemini") and not api_key:
+        return {
+            "status": "offline",
+            "message": "Chave de API obrigatória para este provedor (online).",
+            "models": [],
+            "costs": {},
+        }
+
+    auth = meta.get("auth", "bearer")
+    headers = {"Accept": "application/json"}
+    params = {}
+    if auth == "query":
+        params[meta.get("key_param", "key")] = api_key
+    elif auth == "bearer" and api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    # Rota de listagem de modelos por provedor.
+    if provider == "ollama":
+        url = f"{base}/api/tags"
+    else:
+        url = f"{base}/models"
+
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=30)
+        resp.raise_for_status()
+        body = resp.json()
+    except Exception as exc:  # noqa: BLE001 - credencial/rota inválida
+        return {
+            "status": "offline",
+            "message": f"Falha ao validar credenciais: {exc}",
+            "models": [],
+            "costs": {},
+        }
+
+    raw_models = []
+    if provider == "ollama":
+        raw_models = [
+            m.get("name") for m in (body.get("models") or []) if isinstance(m, dict)
+        ]
+    elif provider == "gemini":
+        raw_models = [
+            m.get("name") for m in (body.get("models") or []) if isinstance(m, dict)
+        ]
+    else:
+        raw_models = [
+            m.get("id") for m in (body.get("data") or []) if isinstance(m, dict)
+        ]
+
+    models = []
+    for mid in raw_models:
+        normalized = _normalize_model_id(provider, mid)
+        if normalized and normalized not in models:
+            models.append(normalized)
+    # Limita para não sobrecarregar o dropdown do navegador.
+    models = models[:300]
+
+    return {
+        "status": "online" if body is not None else "offline",
+        "message": f"{len(models)} modelo(s) encontrado(s).",
+        "models": models,
+        "costs": default_model_costs(provider, models),
+    }
+
+
+def default_model_costs(provider: str, models: Optional[list] = None) -> dict:
+    """
+    Retorna o custo de tokens (US$/token) para FinOps, consultando
+    ``litellm.model_cost`` para o primeiro modelo reconhecido da lista.
+    """
+    provider = str(provider or "deepseek").strip().lower()
+    try:
+        import litellm  # lazy: só necessário na inspeção de provedores
+
+        for mid in (models or []):
+            for key in (str(mid), f"{provider}/{mid}"):
+                info = litellm.model_cost.get(key)
+                if info:
+                    return {
+                        "input_cost_per_token": info.get("input_cost_per_token"),
+                        "output_cost_per_token": info.get("output_cost_per_token"),
+                    }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Falha ao ler litellm.model_cost: %s", exc)
+    fallback = PROVIDER_FALLBACK_COSTS.get(provider) or {}
+    return {
+        "input_cost_per_token": fallback.get("input_cost_per_token"),
+        "output_cost_per_token": fallback.get("output_cost_per_token"),
+    }
+

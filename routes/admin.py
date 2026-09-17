@@ -323,6 +323,9 @@ def admin_put_ai_config():
     body = request.get_json(silent=True) or {}
     db = get_db()
     saved = settings_service.save_ai_config(db, body)
+    # Sincroniza o modelo ativo no runtime (usado por ai_service via LiteLLM).
+    if saved.get("model"):
+        current_app.config["DEEPSEEK_MODEL"] = str(saved["model"]).strip()
     return jsonify(saved)
 
 
@@ -355,9 +358,11 @@ def admin_get_ai_provider():
         or current_app.config.get("DEEPSEEK_BASE_URL")
         or system_config.DEFAULT_AI_BASE_URL
     )
+    provider = str(stored.get("PROVIDER") or "deepseek").strip()
     model = settings_service.get_ai_config(db).get("model")
     return jsonify(
         {
+            "provider": provider,
             "base_url": base_url,
             "model": model,
             "has_api_key": bool(key),
@@ -383,6 +388,7 @@ def admin_put_ai_provider():
     body = request.get_json(silent=True) or {}
     api_key = body.get("api_key")
     base_url = body.get("base_url")
+    provider = body.get("provider")
 
     if base_url is not None:
         base_url = str(base_url).strip()
@@ -392,8 +398,15 @@ def admin_put_ai_provider():
     if api_key is not None:
         api_key = str(api_key).strip()
 
+    if provider is not None and str(provider).strip() not in (
+        "deepseek", "openai", "gemini", "ollama", "custom",
+    ):
+        return jsonify({"error": "Provedor inválido. Use: deepseek, openai, gemini, ollama ou custom."}), 400
+
     # Persiste (para restaurar no boot) e aplica no processo em execução.
-    system_config.save_ai_provider(api_key=api_key, base_url=base_url)
+    system_config.save_ai_provider(
+        api_key=api_key, base_url=base_url, provider=provider
+    )
     if api_key is not None:
         current_app.config["DEEPSEEK_API_KEY"] = api_key
     if base_url is not None:
@@ -401,9 +414,47 @@ def admin_put_ai_provider():
 
     # Atualiza o modelo ativo (quando informado) via ai_config persistente.
     if body.get("model"):
-        settings_service.save_ai_config(get_db(), {"model": str(body["model"]).strip()})
+        model_val = str(body["model"]).strip()
+        settings_service.save_ai_config(get_db(), {"model": model_val})
+        current_app.config["DEEPSEEK_MODEL"] = model_val
 
     return admin_get_ai_provider()
+
+
+@admin_bp.route("/admin/api/ai-provider/inspect", methods=["GET", "POST"])
+@admin_required
+def admin_ai_provider_inspect():
+    """
+    Valida credenciais do provedor via LiteLLM e retorna os modelos disponíveis
+    + custos padrão de tokens (FinOps).
+
+    Corpo JSON (POST) ou query params (GET): {"provider", "api_key", "base_url"}.
+    Retorna {"status": "online"|"offline", "models": [...], "costs": {...}}.
+    """
+    from services.ai_service import inspect_provider
+
+    if request.method == "POST":
+        body = request.get_json(silent=True) or {}
+    else:
+        body = request.args
+
+    provider = str(body.get("provider") or "deepseek").strip()
+    api_key = str(body.get("api_key") or "").strip()
+    base_url = str(body.get("base_url") or "").strip()
+    try:
+        result = inspect_provider(
+            provider=provider, api_key=api_key, base_url=base_url
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:  # noqa: BLE001 - nunca deixar o endpoint quebrar
+        result = {
+            "status": "offline",
+            "message": f"Falha ao inspecionar provedor: {exc}",
+            "models": [],
+            "costs": {},
+        }
+    return jsonify(result)
 
 
 def _dir_size_bytes(path: str) -> int:

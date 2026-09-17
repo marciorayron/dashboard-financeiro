@@ -46,6 +46,7 @@ from database.connection import get_db
 from routes.auth import admin_required, current_user_id, login_required
 from services import ai_service, analytics_service
 from services.ai_service import (
+    AIUpstreamError,
     AIValidationError,
     PromptInjectionError,
     ask_ai as ai_ask_question,
@@ -516,6 +517,9 @@ def analytics_explain_anomaly():
                 detail=json.dumps(body, ensure_ascii=False)[:200],
             )
         return _limit_error_response(exc)
+    except AIUpstreamError as exc:
+        current_app.logger.error("Erro de IA no explain-anomaly (%s): %s", exc.error, exc.message)
+        return _limit_error_response(exc)
 
     return jsonify({"explanation": explanation})
 
@@ -560,6 +564,22 @@ def analytics_ask_ai():
                 detail=(question or "")[:200],
             )
         return _limit_error_response(exc)
+    except AIUpstreamError as exc:
+        # 504 (timeout) / 500 (falha de API do provedor) — JSON claro p/ frontend.
+        current_app.logger.error("Erro de IA no ask-ai (%s): %s", exc.error, exc.message)
+        return _limit_error_response(exc)
+    except Exception:  # noqa: BLE001 - nunca vazar erro interno não tratado
+        current_app.logger.exception("Falha inesperada ao processar pergunta à IA")
+        return jsonify(
+            {
+                "error": "AI_INTERNAL",
+                "message": (
+                    "Não foi possível processar sua pergunta neste momento. "
+                    "Tente novamente em instantes; se o problema persistir, "
+                    "contate o suporte."
+                ),
+            }
+        ), 500
 
     return jsonify({"answer": answer})
 
@@ -643,6 +663,9 @@ def analytics_explain_paystub():
                 detail=(question or "")[:200],
             )
         return _limit_error_response(exc)
+    except AIUpstreamError as exc:
+        current_app.logger.error("Erro de IA no explain-paystub (%s): %s", exc.error, exc.message)
+        return _limit_error_response(exc)
 
     return jsonify({"answer": answer})
 
@@ -701,19 +724,23 @@ def analytics_explain_card():
     # LGPD: garante que o payload do card que segue à IA não contém PII.
     result = ai_service.anonymize_payload(result)
 
-    # 3) Invoca a IA (best-effort) quando chave configurada; offline mantém o
-    #    texto determinístico. Consome 1 crédito da cota do plano.
+    # 3) Invoca a IA quando chave configurada; offline mantém o texto
+    #    determinístico. Consome 1 crédito da cota do plano.
     api_key = current_app.config.get("DEEPSEEK_API_KEY")
-    if api_key:
-        refined = ai_explain_card(
-            result["title"],          # rótulo human-readable, NUNCA a chave crua
-            result["markdown"],       # contexto com os valores numéricos reais
-            api_key=api_key,
-            base_url=current_app.config.get("DEEPSEEK_BASE_URL"),
-        )
-        if refined and not refined.startswith("Não foi possível"):
-            result["markdown"] = analytics_service.humanize_explanation(refined)
-    log_ai_usage(db, user_id)
+    try:
+        if api_key:
+            refined = ai_explain_card(
+                result["title"],          # rótulo human-readable, NUNCA a chave crua
+                result["markdown"],       # contexto com os valores numéricos reais
+                api_key=api_key,
+                base_url=current_app.config.get("DEEPSEEK_BASE_URL"),
+            )
+            if refined and not refined.startswith("Não foi possível"):
+                result["markdown"] = analytics_service.humanize_explanation(refined)
+        log_ai_usage(db, user_id)
+    except AIUpstreamError as exc:
+        current_app.logger.error("Erro de IA no explain-card (%s): %s", exc.error, exc.message)
+        return _limit_error_response(exc)
 
     # Saneamento final de qualquer saída (determinística ou da IA).
     markdown = analytics_service.humanize_explanation(result["markdown"])
