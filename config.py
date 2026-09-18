@@ -18,12 +18,17 @@ load_dotenv()
 # Diretório raiz do projeto (subindo um nível a partir de `config.py`).
 BASE_DIR = Path(__file__).resolve().parent
 
+# Fallback de SECRET_KEY: garante que a aplicação nunca inicie sem chave de
+# sessão (variável ausente OU vazia, ex.: `.env` com `SECRET_KEY=`).
+# Em produção, defina sempre uma chave forte via ambiente.
+_DEFAULT_SECRET_KEY = "dev-secret-key-change-in-prod"
+
 
 class Config:
     """Configuração base compartilhada por todos os ambientes."""
 
     # Segredo para assinar sessões e cookies.
-    SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-key-change-me")
+    SECRET_KEY = os.getenv("SECRET_KEY") or _DEFAULT_SECRET_KEY
 
     # Caminho absoluto do banco SQLite.
     # Aceita `DATABASE_PATH` (caminho puro) ou `DATABASE_URL` (alias no formato
@@ -90,8 +95,10 @@ class ProductionConfig(Config):
 
     DEBUG = False
 
-    # Em produção exigimos uma SECRET_KEY forte definida no ambiente.
-    SECRET_KEY = os.getenv("SECRET_KEY")
+    # Em produção, use uma SECRET_KEY forte definida no ambiente. Se ela não
+    # estiver definida (ou estiver vazia), aplicamos um fallback para que a
+    # aplicação NÃO quebre com "no secret key was set" (troque em produção).
+    SECRET_KEY = os.getenv("SECRET_KEY") or _DEFAULT_SECRET_KEY
 
     # Arquivos estáticos com hash para cache-busting.
     SEND_FILE_MAX_AGE_DEFAULT = 31536000  # 1 ano

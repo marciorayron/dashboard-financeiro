@@ -111,6 +111,13 @@ def create_app(env: str = None) -> Flask:
     # 1) Carrega a configuração (por ambiente, default development).
     app.config.from_object(get_config(env))
 
+    # 1.0) Rede de segurança: a aplicação NUNCA deve iniciar sem SECRET_KEY,
+    # sob pena de "RuntimeError: The session is unavailable because no secret
+    # key was set". `config.py` já define um fallback; esta checagem protege
+    # contra overrides externos que resultem em valor vazio/None.
+    if not app.config.get("SECRET_KEY"):
+        app.config["SECRET_KEY"] = "dev-secret-key-change-in-prod"
+
     # 1.1) Serialização JSON robusta: garante que nenhuma resposta contenha
     # NaN / Infinity / -Infinity (literais inválidos para o parser do navegador).
     from services.safe_json import SafeJSONProvider

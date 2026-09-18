@@ -34,7 +34,8 @@ def seed_default_admin(db, force: bool = False) -> dict:
     Se já existir um admin e `force` for False, não faz nada. Caso contrário,
     cria a conta padrão a partir das variáveis de ambiente — ou, se a conta
     com o e-mail padrão já existir, promove-a a `admin` e reseta a senha
-    (evita violar o UNIQUE em `users.email`).
+    (evita violar o UNIQUE em `users.email`). A inserção usa `INSERT OR IGNORE`
+    para ser segura sob concorrência (ex.: múltiplos workers no startup).
 
     Args:
         db: conexão SQLite ativa.
@@ -64,6 +65,7 @@ def seed_default_admin(db, force: bool = False) -> dict:
 
     password_hash = generate_password_hash(password)
     reset = row is not None
+    created = False
 
     if reset:
         db.execute(
@@ -76,16 +78,22 @@ def seed_default_admin(db, force: bool = False) -> dict:
             [ROLE_ADMIN, password_hash, email],
         )
     else:
-        db.execute(
+        # `INSERT OR IGNORE`: idempotente e seguro sob concorrência — evita o
+        # "sqlite3.IntegrityError: UNIQUE constraint failed: users.email"
+        # quando o seeder roda mais de uma vez (ex.: reinicialização do banco
+        # ou múltiplos workers do gunicorn inicializando ao mesmo tempo).
+        cur = db.execute(
             f"""
-            INSERT INTO {USER_TABLE}
+            INSERT OR IGNORE INTO {USER_TABLE}
                 (name, email, password_hash, role, is_active, profile_completed)
             VALUES (?, ?, ?, ?, 1, 1)
             """,
             [DEFAULT_ADMIN_NAME, email, password_hash, ROLE_ADMIN],
         )
+        # rowcount == 1 quando a linha foi realmente inserida; 0 se ignorada.
+        created = cur.rowcount > 0
     db.commit()
 
-    action = "reset" if reset else "created"
+    action = "reset" if reset else ("created" if created else "exists")
     logger.info("[SEED] Default admin user %s: %s", action, email)
-    return {"created": not reset, "reset": reset, "skipped": False, "email": email}
+    return {"created": created, "reset": reset, "skipped": False, "email": email}
