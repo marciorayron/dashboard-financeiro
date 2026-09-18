@@ -18,10 +18,11 @@ services:
     # Carrega segredos/config a partir do `.env` local (não versionado).
     env_file:
       - .env
-    # Volumes persistentes (banco de dados e uploads).
+    # Volumes persistentes (banco de dados, uploads e configurações admin).
     volumes:
       - ./data:/app/data
       - ./uploads:/app/uploads
+      - ./instance:/app/instance
     # Variáveis de ambiente com caminhos do container (e defaults seguros).
     environment:
       - FLASK_ENV=${FLASK_ENV:-production}

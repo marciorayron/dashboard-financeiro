@@ -16,6 +16,10 @@ uploads/
 .env
 .env.example
 
+# Configurações/segredos gerados em runtime (ex.: instance/admin_config.json
+# com a API key do provedor de IA) — nunca devem entrar na imagem.
+instance/
+
 # Controle de versão e IDE.
 .git/
 .gitignore
