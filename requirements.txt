@@ -17,6 +17,11 @@ pdfplumber==0.11.10
 # A comunicação é via HTTP/JSON (requests) — NÃO é usado um SDK dedicado.
 requests==2.34.2
 
+# IA conversacional (assistente contextualizado) via LiteLLM — roteia múltiplos
+# provedores (deepseek/gemini/ollama) e expõe `litellm.model_cost`, usado pelo
+# FinOps do painel admin. Import tardio em services/ai_service.py.
+litellm==1.100.0
+
 # Manipulação de dados, cálculo vetorizado e exportação (XLSX/CSV).
 # numpy é importado diretamente pelos serviços de analytics.
 pandas==3.0.5

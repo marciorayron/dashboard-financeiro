@@ -41,3 +41,15 @@ services:
       start_period: 10s
       retries: 3
 
+  # Sidecar de auto-atualização: verifica o Docker Hub a cada 5 min e recria
+  # o container informado quando há imagem nova (--cleanup remove as antigas).
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: watchtower
+    restart: unless-stopped
+    # Acesso ao socket do Docker para inspecionar/recriar containers.
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    # Sintaxe de array (exec form): evita parsing de shell e aspas inconsistentes.
+    command: ["--interval", "300", "--cleanup", "dashboard-financeiro"]
+
